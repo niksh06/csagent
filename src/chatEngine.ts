@@ -54,9 +54,12 @@ import {
   formatSdkError,
   isAgentRotatableError,
   isAuthErrorText,
+  isContextOverflowErrorText,
   isOverloadErrorText,
   OVERLOAD_RETRY_DELAYS_MS,
 } from "./sdkErrors.js";
+import { createMemoryStore } from "./memoryStore.js";
+import { writeSessionHandoff } from "./sessionHandoff.js";
 import {
   API_KEY_HELP,
   ANTHROPIC_API_KEY_HELP,
@@ -118,6 +121,16 @@ export interface ChatSessionOptions {
   onAgentRotating?: (info: { reason: string }) => void;
   /** Fired when SDK agent is replaced inside the same irida session. */
   onAgentRotated?: (info: AgentRotatedInfo) => void;
+  /**
+   * Fired after a context-overflow was resolved by handoff + `/compact` (the
+   * session survives, unlike rotation). Surfaces so the UI can tell the user their
+   * companion just shed history rather than letting it happen invisibly.
+   */
+  onSessionCompacted?: (info: {
+    sessionId: string;
+    reason: string;
+    handoffNote?: string;
+  }) => void;
   /** Overload retry backoff schedule override (tests only; default OVERLOAD_RETRY_DELAYS_MS). */
   overloadRetryDelaysMs?: number[];
   /** Session store override (tests only; default createStore(dir)). */
@@ -807,6 +820,75 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
         return rotateAgent(reason);
       };
 
+      /**
+       * Context-window overflow: hand off, then compact — instead of rotating.
+       *
+       * Rotation "works" for an over-long session (the new agent accepts the turn)
+       * but at a cost nobody is told about: the SDK session is discarded and only
+       * the last 4 run previews are replayed, so a months-long chat silently
+       * restarts as a 6 KB stub. `/compact` is the SDK's own manual-compaction
+       * trigger — it sheds history while KEEPING the session and the model's
+       * summary of it, which is what a long-running companion session actually
+       * needs (see isCompactCommand above).
+       *
+       * Order matters. The handoff note is written FIRST, from the run store, with
+       * no model call — it is the black box that survives even if the compact call
+       * itself dies. Then `/compact` goes to the SDK verbatim (it must not be
+       * wrapped in preTurn/memory blocks or the trigger stops matching). Then the
+       * caller retries the ORIGINAL user message on the same agent.
+       *
+       * Returns false when compaction is unavailable or fails, so the caller falls
+       * through to the existing rotation path — degraded, but never a hard error.
+       * Shares no budget with rotation but is itself once-per-turn.
+       */
+      let compacted = false;
+      const tryCompactOnContextOverflow = async (reason: string): Promise<boolean> => {
+        if (compacted) return false;
+        compacted = true;
+        log(`[chat] context overflow — handoff + compact reason=${reason}`);
+
+        let handoffNote: string | undefined;
+        try {
+          const memoryStore = createMemoryStore(dir, cfg.stateDir);
+          try {
+            handoffNote = await writeSessionHandoff(store, memoryStore, sessionId, {
+              reason,
+              channel: sessionChannel,
+            });
+          } finally {
+            await memoryStore.close();
+          }
+          log(`[chat] handoff written note=${handoffNote ?? "-"}`);
+        } catch (e) {
+          // Non-fatal: losing the note is bad, losing the compact is worse.
+          log(
+            `[chat] handoff write failed — compacting anyway: ${e instanceof Error ? e.message : String(e)}`
+          );
+        }
+
+        try {
+          const compactRun = await sendAgentTurn(agent, "/compact", cfg.model, {});
+          await consumeRunStream(compactRun, () => {});
+          const res = await compactRun.wait();
+          if (String(res.status) === "error") {
+            log(`[chat] compact failed (run error) — falling back to rotation`);
+            return false;
+          }
+        } catch (e) {
+          log(
+            `[chat] compact failed — falling back to rotation: ${e instanceof Error ? e.message : String(e)}`
+          );
+          return false;
+        }
+
+        log(`[chat] compact ok — retrying original turn on the same agent`);
+        // Retry the plain composed message: the pre-compact prompt may have carried
+        // a replay prefix that the compacted session no longer needs.
+        attemptSendMsg = coreSendMsg;
+        onTurnRetry?.(reason);
+        opts.onSessionCompacted?.({ sessionId, reason, handoffNote });
+        return true;
+      };
 
       /**
        * Claude OAuth token pool failover (I-169): an auth-classified failure
@@ -1021,6 +1103,15 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
             ) {
               continue;
             }
+            // Overflow before rotation: compacting keeps the session, rotating throws it away.
+            if (
+              isContextOverflowErrorText(detail) &&
+              toolCalls === 0 &&
+              turnText.length === 0 &&
+              (await tryCompactOnContextOverflow(rotateReason))
+            ) {
+              continue;
+            }
             if (toolCalls === 0 && turnText.length === 0 && (await tryRotateAgent(rotateReason))) {
               continue;
             }
@@ -1132,6 +1223,15 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
             continue;
           }
 
+          // Overflow before rotation: compacting keeps the session, rotating throws it away.
+          if (
+            toolCalls === 0 &&
+            turnText.length === 0 &&
+            isContextOverflowErrorText(formatted.message) &&
+            (await tryCompactOnContextOverflow(rotateReason))
+          ) {
+            continue;
+          }
 
           if (
             toolCalls === 0 &&
