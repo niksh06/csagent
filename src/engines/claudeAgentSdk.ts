@@ -258,7 +258,29 @@ type QueryOptions = {
   disallowedTools?: string[];
   /** I-158: reasoning effort for the run (SDK: low|medium|high|xhigh|max). */
   effort?: string;
+  /** Which filesystem settings the SDK may load (see IRIDA_SETTING_SOURCES). */
+  settingSources?: string[];
 };
+
+/**
+ * Filesystem settings an Irida-spawned agent is allowed to inherit.
+ *
+ * The SDK's default (option omitted) is "load everything the CLI would" — which
+ * on a developer machine means the OPERATOR's personal `~/.claude` bleeds into
+ * every autonomous run: their MCP servers, their PreToolUse/SessionStart hooks,
+ * their Bash permission allow-list. Measured on the live Telegram session
+ * (2026-07-25): 14 MCP servers attached where Irida declares 5, four of the
+ * inherited ones failing to start on EVERY turn and burning the full 60s
+ * MCP_TIMEOUT before the agent could use any tool at all — median 65s of each
+ * turn spent tool-less, and 15% of turns finished before tools ever arrived.
+ * The agent experienced this as its tools "flickering" all day.
+ *
+ * `project` (not `[]`) is deliberate: it drops user scope — the actual problem —
+ * while still loading the repo's CLAUDE.md, which agents working inside the
+ * Irida checkout rely on. What an Irida agent gets is now Irida's decision,
+ * declared in `mcpServers`, not a side effect of whose machine it runs on.
+ */
+const IRIDA_SETTING_SOURCES = ["project"] as const;
 
 /**
  * Permission options for a `query()` call (I-94). Gate OFF → keep the prior
@@ -400,6 +422,7 @@ export function createClaudeAgentSdk(
             Boolean(init.mcpServers?.["csagent-ask"])
           ),
           ...(effort ? { effort } : {}),
+          settingSources: [...IRIDA_SETTING_SOURCES],
           ...(init.mcpServers ? { mcpServers: init.mcpServers } : {}),
           ...(sessionId ? { resume: sessionId } : {}),
         });
@@ -583,6 +606,7 @@ export function createClaudeAgentSdk(
           Boolean(mcpServers?.["csagent-ask"])
         ),
         ...(effort ? { effort } : {}),
+        settingSources: [...IRIDA_SETTING_SOURCES],
         ...(mcpServers ? { mcpServers } : {}),
         ...(sdkOpts.disallowedTools?.length ? { disallowedTools: sdkOpts.disallowedTools } : {}),
       });

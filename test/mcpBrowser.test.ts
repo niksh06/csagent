@@ -10,7 +10,7 @@ import { BROWSER_MCP_NAME, resolveMcpServers } from "../src/mcpServers.js";
 import { resolveBrowserMcpContext } from "../src/mcp/browserContext.js";
 import { gatherDoctorChecks } from "../src/doctorChecks.js";
 
-test("resolveMcpServers adds csagent-browser when browser.mcp true", () => {
+test("resolveMcpServers adds irida-browser when browser.mcp true", () => {
   const dir = mkdtempSync(resolve(tmpdir(), "browser-mcp-"));
   writeFileSync(join(dir, "agent.config.json"), JSON.stringify({ browser: { mcp: true } }));
   const cfg = loadConfig(dir);
@@ -22,7 +22,7 @@ test("resolveMcpServers adds csagent-browser when browser.mcp true", () => {
   assert.equal(entry.env?.CSAGENT_BROWSER_HEADLESS, "true");
 });
 
-test("resolveMcpServers omits csagent-browser by default", () => {
+test("resolveMcpServers omits irida-browser by default", () => {
   const dir = mkdtempSync(resolve(tmpdir(), "browser-off-"));
   const cfg = loadConfig(dir);
   assert.equal(BROWSER_MCP_NAME in resolveMcpServers(cfg, dir), false);

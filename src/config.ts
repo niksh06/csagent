@@ -100,7 +100,7 @@ export interface MemoryConfig {
 
 /** Stealth browser MCP (puppeteer-extra + persistent Chromium profile). */
 export interface BrowserConfig {
-  /** Attach csagent-browser MCP tools (default false). Set true to enable. */
+  /** Attach irida-browser MCP tools (default false). Set true to enable. */
   mcp?: boolean;
   /** Chromium user-data profile name under `<state>/browser/` (default `default`). */
   profile?: string;

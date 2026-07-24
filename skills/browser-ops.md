@@ -1,10 +1,10 @@
 ---
 name: browser-ops
-description: Use csagent-browser MCP for live web pages; snapshot before acting; persist login sessions
+description: Use irida-browser MCP for live web pages; snapshot before acting; persist login sessions
 tags: [browser, csagent, web]
 ---
 
-Browser is **on-demand** via `csagent-browser` MCP (`browser.mcp: true` in config). Do not describe pages you have not opened with tools.
+Browser is **on-demand** via `irida-browser` MCP (`browser.mcp: true` in config). Do not describe pages you have not opened with tools.
 
 ## When to use
 
