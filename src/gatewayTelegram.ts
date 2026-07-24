@@ -874,8 +874,8 @@ export function startTelegramPoller(opts: TelegramPollerOptions): TelegramPoller
     });
     if (!result.handled || !result.chatId) return;
     if (suppressed?.()) {
-      // /stop arrived while this turn ran — the SDK work is done (and billed),
-      // but the user explicitly discarded it.
+      // /stop arrived while this turn ran — cancellation is best-effort across
+      // engines, and the queue epoch guarantees no stale reply escapes either way.
       logInfo(`[gateway] reply suppressed by /stop chat=${result.chatId}`);
       return;
     }
@@ -1004,14 +1004,26 @@ export function startTelegramPoller(opts: TelegramPollerOptions): TelegramPoller
         /* best-effort */
       }
     }
-    const interrupted = Boolean(q?.running);
+    const hadRunningTurn = Boolean(q?.running);
     if (q) q.epoch++;
-    logInfo(`[gateway] /stop chat=${chatId} inflight=${interrupted} droppedQueued=${droppedItems.length}`);
-    const ack = interrupted
-      ? `⏹ Ок: текущий ответ отброшен${droppedItems.length ? `, очередь очищена (${droppedItems.length})` : ""}.`
-      : droppedItems.length
-        ? `⏹ Очередь очищена (${droppedItems.length}).`
-        : "Нечего прерывать — сейчас ничего не выполняется.";
+    let cancelled = false;
+    if (hadRunningTurn) {
+      try {
+        cancelled = await opts.router.cancelActive(chatId);
+      } catch (e) {
+        logError(`[gateway] /stop cancel failed chat=${chatId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    logInfo(
+      `[gateway] /stop chat=${chatId} inflight=${hadRunningTurn} cancelled=${cancelled} droppedQueued=${droppedItems.length}`
+    );
+    const ack = cancelled
+      ? `⏹ Ок: текущий запрос остановлен${droppedItems.length ? `, очередь очищена (${droppedItems.length})` : ""}.`
+      : hadRunningTurn
+        ? `⏹ Ок: текущий ответ будет отброшен${droppedItems.length ? `, очередь очищена (${droppedItems.length})` : ""}.`
+        : droppedItems.length
+          ? `⏹ Очередь очищена (${droppedItems.length}).`
+          : "Нечего прерывать — сейчас ничего не выполняется.";
     await deliverWithRetry(chatId, ack, false);
   };
 

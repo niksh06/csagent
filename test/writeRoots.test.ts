@@ -26,6 +26,13 @@ describe("writeRootsViolation (I-157)", () => {
     assert.equal(writeRootsViolation("Edit", { file_path: "/tmp/ouro-workspace/sub/../ok.ts" }, ROOTS), null);
   });
 
+  it("resolves relative targets against the query cwd", () => {
+    const cwd = "/tmp/ouro-workspace/project";
+    assert.equal(writeRootsViolation("Write", { file_path: "src/new.ts" }, [cwd], cwd), null);
+    assert.ok(writeRootsViolation("Write", { file_path: "../../outside.ts" }, [cwd], cwd));
+    assert.ok(writeRootsViolation("Write", { file_path: "escape.ts" }, [process.cwd()], cwd));
+  });
+
   it("fail-closed: mutation tool without a verifiable path is denied", () => {
     assert.ok(writeRootsViolation("Write", {}, ROOTS));
     assert.ok(writeRootsViolation("NotebookEdit", { notebook_path: "  " }, ROOTS));

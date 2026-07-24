@@ -36,6 +36,33 @@ test("resolveAgentLogger forwards to onLog when CSAGENT_LOG off", () => {
   else process.env.CSAGENT_LOG = prev;
 });
 
+test("resolveAgentLogger isolates failures in the diagnostic sink", () => {
+  const log = resolveAgentLogger({
+    component: "test",
+    onLog: () => {
+      throw new Error("log sink failed");
+    },
+  });
+  assert.doesNotThrow(() => log("[chat] opened"));
+});
+
+test("resolveAgentLogger handles rejected promises from an asynchronous diagnostic sink", () => {
+  let rejectionHandled = false;
+  const rejected = Promise.reject(new Error("async log sink failed"));
+  const originalCatch = rejected.catch.bind(rejected);
+  rejected.catch = ((onRejected?: (reason: unknown) => unknown) => {
+    rejectionHandled = true;
+    return originalCatch(onRejected);
+  }) as typeof rejected.catch;
+  const log = resolveAgentLogger({ component: "test", onLog: () => rejected });
+
+  log("[chat] opened");
+  // Keep the RED implementation from leaking an unhandled rejection into the
+  // test runner while still proving that the logger attached its own handler.
+  if (!rejectionHandled) void originalCatch(() => undefined);
+  assert.equal(rejectionHandled, true);
+});
+
 test("resolveAgentLogger writes to logFile instead of stdout (TUI, I-17)", () => {
   const prev = process.env.CSAGENT_LOG;
   process.env.CSAGENT_LOG = "1";

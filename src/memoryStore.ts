@@ -182,6 +182,7 @@ export class SqliteMemoryStore implements IMemoryStore {
   private db: DatabaseSync;
   private readonly stateRoot: string;
   private readonly searchExcludeWings: readonly string[];
+  private closed = false;
 
   constructor(stateRoot: string, opts: { searchExcludeWings?: readonly string[] } = {}) {
     this.stateRoot = resolve(stateRoot);
@@ -396,6 +397,8 @@ export class SqliteMemoryStore implements IMemoryStore {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     releaseSharedSqliteDb(this.stateRoot);
   }
 }

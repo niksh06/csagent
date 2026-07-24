@@ -7,6 +7,7 @@ import { eventThinkingText, type AgentLike, type RunLike, type SdkCreateLike, ty
 import { openChatSession } from "../src/chatEngine.js";
 import { runPrompt } from "../src/run.js";
 import { runDelegate } from "../src/delegateRun.js";
+import { createClaudeAgentSdk } from "../src/engines/claudeAgentSdk.js";
 
 // H-10: claude-agent parity — thinking extraction, idle-rotation skip,
 // one-shot overload retry, delegate without a hard CURSOR gate.
@@ -46,6 +47,12 @@ function okRun(text: string): RunLike {
     },
     wait: async () => ({ status: "finished", id: "r" }),
   };
+}
+
+async function* claudeMessages(
+  messages: Array<Record<string, unknown>>
+): AsyncIterable<Record<string, unknown>> {
+  for (const message of messages) yield message;
 }
 
 describe("idle rotation (H-10)", () => {
@@ -142,6 +149,129 @@ describe("one-shot overload retry (H-10)", () => {
       assert.equal(calls, 1);
       assert.notEqual(out.exitCode, 0);
     });
+  });
+
+  it("retries a real Claude SDKResultError shape whose detail lives in errors[]", async () => {
+    await withEnv(
+      {
+        CURSOR_API_KEY: undefined,
+        ANTHROPIC_API_KEY: "sk-ant-test-key-long-enough-000000000000",
+      },
+      async () => {
+        const dir = mkdtempSync(resolve(tmpdir(), "oneshot-claude-result-"));
+        writeFileSync(
+          join(dir, "agent.config.json"),
+          JSON.stringify({ stateDir: ".agent", engine: { provider: "claude-agent" } }),
+          "utf8"
+        );
+        let calls = 0;
+        const sdk = createClaudeAgentSdk(undefined, {
+          startQuery: async () => {
+            calls++;
+            if (calls === 1) {
+              return claudeMessages([
+                {
+                  type: "result",
+                  subtype: "error_during_execution",
+                  is_error: true,
+                  errors: ["API Error: 529 overloaded"],
+                  uuid: "run-1",
+                  session_id: "sess-claude",
+                },
+              ]);
+            }
+            return claudeMessages([
+              {
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                result: "recovered",
+                uuid: "run-2",
+                session_id: "sess-claude",
+              },
+            ]);
+          },
+        });
+
+        const out = await runPrompt("ping", {
+          sdk,
+          dir,
+          persistRun: false,
+          quiet: true,
+          barePrompt: true,
+          overloadRetryDelaysMs: [0],
+        });
+
+        assert.equal(calls, 2);
+        assert.equal(out.exitCode, 0);
+        assert.equal(out.text, "recovered");
+      }
+    );
+  });
+});
+
+describe("interactive Claude result contract (H-10)", () => {
+  it("keeps errors[] detail so chat retries an overload result in place", async () => {
+    await withEnv(
+      { ANTHROPIC_API_KEY: "sk-ant-test-key-long-enough-000000000000" },
+      async () => {
+        const dir = mkdtempSync(resolve(tmpdir(), "chat-claude-result-"));
+        writeFileSync(
+          join(dir, "agent.config.json"),
+          JSON.stringify({ stateDir: ".agent", engine: { provider: "claude-agent" } }),
+          "utf8"
+        );
+        const resumes: Array<string | undefined> = [];
+        const sdk = createClaudeAgentSdk(undefined, {
+          startQuery: async (_message, options) => {
+            resumes.push(options.resume);
+            if (resumes.length === 1) {
+              return claudeMessages([
+                {
+                  type: "result",
+                  subtype: "error_during_execution",
+                  is_error: true,
+                  errors: ["API Error: 529 overloaded"],
+                  uuid: "run-chat-1",
+                  session_id: "sess-chat-claude",
+                },
+              ]);
+            }
+            return claudeMessages([
+              {
+                type: "assistant",
+                message: { content: [{ type: "text", text: "recovered" }] },
+                session_id: "sess-chat-claude",
+              },
+              {
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                result: "recovered",
+                uuid: "run-chat-2",
+                session_id: "sess-chat-claude",
+              },
+            ]);
+          },
+        });
+        const opened = await openChatSession({
+          sdk,
+          dir,
+          interactive: false,
+          overloadRetryDelaysMs: [0],
+        });
+        assert.equal(opened.ok, true);
+        if (!opened.ok) return;
+        try {
+          const out = await opened.session.sendTurn("hello");
+          assert.equal(out.kind, "ok");
+          if (out.kind === "ok") assert.equal(out.assistantText, "recovered");
+          assert.deepEqual(resumes, [undefined, "sess-chat-claude"]);
+        } finally {
+          await opened.session.close();
+        }
+      }
+    );
   });
 });
 

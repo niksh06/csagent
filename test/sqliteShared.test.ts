@@ -52,3 +52,34 @@ test("createStore + createMemoryStore use shared sqlite pool", async () => {
   resetSharedSqlitePoolsForTests();
   assert.ok(stateRoot);
 });
+
+test("SqliteStore close is idempotent while another shared owner is live", async () => {
+  resetSharedSqlitePoolsForTests();
+  const dir = tmp();
+  const session = createStore(dir, ".agent");
+  const memory = createMemoryStore(dir);
+  try {
+    await session.close();
+    await session.close();
+    await memory.upsertNote({ name: "still-open", body: "body" });
+    assert.equal((await memory.getNote("still-open"))?.body, "body");
+  } finally {
+    await memory.close();
+    resetSharedSqlitePoolsForTests();
+  }
+});
+
+test("SqliteMemoryStore close is idempotent while another shared owner is live", async () => {
+  resetSharedSqlitePoolsForTests();
+  const dir = tmp();
+  const session = createStore(dir, ".agent");
+  const memory = createMemoryStore(dir);
+  try {
+    await memory.close();
+    await memory.close();
+    assert.deepEqual(await session.listSessions(), []);
+  } finally {
+    await session.close();
+    resetSharedSqlitePoolsForTests();
+  }
+});

@@ -82,3 +82,44 @@ test("replay preparation can stop fallback before fresh agent create", async () 
   assert.deepEqual(order, ["resume", "prepare"]);
   await store.close();
 });
+
+test("fresh replay agent is disposed when transcript loading fails", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sessconn-"));
+  const cfg = loadConfig(dir);
+  const store = new Store(dir, cfg.stateDir);
+  await store.upsertSession({
+    id: "sess_1",
+    title: "t",
+    cwd: dir,
+    runtime: cfg.runtime,
+    sdk_agent_id: null,
+    last_status: "created",
+    channel: "",
+  });
+
+  let disposeCalls = 0;
+  const createdAgent: AgentLike = {
+    agentId: "agent-fresh",
+    send: () => ({ wait: async () => ({ status: "finished" }) }),
+    [Symbol.asyncDispose]: async () => {
+      disposeCalls++;
+    },
+  };
+  const sdk: SdkCreateLike & SdkResumeLike = {
+    resume: async () => {
+      throw new Error("resume should not run without a stored agent id");
+    },
+    create: async () => createdAgent,
+  };
+  store.listRuns = async () => {
+    throw new Error("transcript unavailable");
+  };
+
+  const session = (await store.getSession("sess_1"))!;
+  await assert.rejects(
+    connectAgentForSession(sdk, store, session, cfg, "key", {}),
+    /transcript unavailable/
+  );
+  assert.equal(disposeCalls, 1);
+  await store.close();
+});

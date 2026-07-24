@@ -174,7 +174,7 @@ test("startup replays journaled updates that never finished", async () => {
   });
 });
 
-test("/stop bypasses the queue: clears pending, suppresses the in-flight reply", async () => {
+test("/stop bypasses the queue: cancels the active turn, clears pending, suppresses its reply", async () => {
   await withEnv(async () => {
     const dir = tmp();
     const cfg = writeExampleGatewayConfig(dir, {
@@ -185,6 +185,13 @@ test("/stop bypasses the queue: clears pending, suppresses the in-flight reply",
     let release: () => void = () => {};
     const state = { gate: new Promise<void>((r) => (release = r)), sends: [] as string[] };
     const router = new GatewaySessionRouter({ dir, adapter: "telegram", sdk: gatedSdk(state) });
+    let cancelCalls = 0;
+    router.cancelActive = async (chatId) => {
+      assert.equal(chatId, "1");
+      cancelCalls++;
+      release();
+      return true;
+    };
     const sent: SentMessage[] = [];
     const fetchFn = telegramFetchStub(
       [
@@ -195,15 +202,18 @@ test("/stop bypasses the queue: clears pending, suppresses the in-flight reply",
     );
     const poller = startTelegramPoller({ cfg, router, fetchFn, pollIntervalMs: 20, dir });
     await sleep(300);
-    // Prompt ack even though the chat's turn is still hanging.
-    assert.ok(
-      sent.some((s) => s.chatId === "1" && /прерв|очищ|⏹/i.test(s.text)),
-      `expected /stop ack; sent=${JSON.stringify(sent)}`
-    );
-    release();
-    await sleep(150);
-    await poller.stop();
-    await router.closeAll();
+    try {
+      assert.equal(cancelCalls, 1);
+      assert.ok(
+        sent.some((s) => s.chatId === "1" && /текущий запрос остановлен/i.test(s.text)),
+        `expected /stop ack; sent=${JSON.stringify(sent)}`
+      );
+    } finally {
+      release();
+      await sleep(150);
+      await poller.stop();
+      await router.closeAll();
+    }
     // The hung turn's reply was suppressed; the queued update never ran.
     assert.ok(!sent.some((s) => s.text.includes("slow-reply")));
     assert.equal(state.sends.length, 1); // only the slow turn ever reached the SDK
