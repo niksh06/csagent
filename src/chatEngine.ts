@@ -54,9 +54,13 @@ import {
   formatSdkError,
   isAgentRotatableError,
   isAuthErrorText,
+  isContextOverflowErrorText,
   isOverloadErrorText,
   OVERLOAD_RETRY_DELAYS_MS,
 } from "./sdkErrors.js";
+import { createMemoryStore } from "./memoryStore.js";
+import { writeSessionHandoff } from "./sessionHandoff.js";
+import { cogitBriefBlocks } from "./cogitBrief.js";
 import {
   API_KEY_HELP,
   ANTHROPIC_API_KEY_HELP,
@@ -118,6 +122,16 @@ export interface ChatSessionOptions {
   onAgentRotating?: (info: { reason: string }) => void;
   /** Fired when SDK agent is replaced inside the same irida session. */
   onAgentRotated?: (info: AgentRotatedInfo) => void;
+  /**
+   * Fired after a context-overflow was resolved by handoff + `/compact` (the
+   * session survives, unlike rotation). Surfaces so the UI can tell the user their
+   * companion just shed history rather than letting it happen invisibly.
+   */
+  onSessionCompacted?: (info: {
+    sessionId: string;
+    reason: string;
+    handoffNote?: string;
+  }) => void;
   /** Overload retry backoff schedule override (tests only; default OVERLOAD_RETRY_DELAYS_MS). */
   overloadRetryDelaysMs?: number[];
   /** Session store override (tests only; default createStore(dir)). */
@@ -158,6 +172,8 @@ export interface ChatSession {
   agentId: string | null;
   connectMode: ConnectMode | "fresh";
   sendTurn(userMessage: string, hooks?: TurnHooks): Promise<TurnOutcome>;
+  /** Request cancellation of the SDK run currently owned by this session. */
+  cancelActiveTurn(): Promise<boolean>;
   /** Record delegate/subagent output into session transcript (replay on next turns). */
   injectContext(userLabel: string, assistantText: string): Promise<void>;
   close(): Promise<void>;
@@ -194,6 +210,8 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
   const dir = opts.dir ?? process.cwd();
   const interactive = opts.interactive ?? true;
   const log = resolveAgentLogger({ component: "chat", onLog: opts.onLog });
+  let onTurnRetry = opts.onTurnRetry;
+  let onStoreDegraded = opts.onStoreDegraded;
 
   let cfg: AgentConfig;
   try {
@@ -384,7 +402,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
       log(
         `[chat] ${label} failed — continuing without it: ${e instanceof Error ? e.message : String(e)}`
       );
-      opts.onStoreDegraded?.(label);
+      onStoreDegraded?.(label);
       return fallback;
     }
   };
@@ -417,6 +435,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
               cfg,
               rawMessage: msg,
               includeProfile: isFirstTurn,
+              isFirstTurn,
               channel: sessionChannel,
             })
         );
@@ -577,6 +596,54 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
       cwd: sessionCwd,
     });
 
+  let operationChain: Promise<void> = Promise.resolve();
+  let closePromise: Promise<void> | undefined;
+  let queuedTurns = 0;
+  let turnCancelEpoch = 0;
+  let turnRunning = false;
+  let turnCanCancel = false;
+  let cancelRequested = false;
+  let activeRun: RunLike | undefined;
+  let cancelPromise: Promise<boolean> | undefined;
+
+  const cancelAttachedRun = (run: RunLike): Promise<boolean> => {
+    if (typeof run.cancel !== "function") return Promise.resolve(false);
+    if (!cancelPromise) {
+      cancelPromise = Promise.resolve()
+        .then(() => run.cancel!())
+        .then(
+          () => true,
+          (e) => {
+            log(
+              `[chat] active run cancellation failed: ${e instanceof Error ? e.message : String(e)}`
+            );
+            return false;
+          }
+        );
+    }
+    return cancelPromise;
+  };
+
+  const requestActiveTurnCancellation = async (): Promise<boolean> => {
+    if (!turnRunning && queuedTurns === 0) return false;
+    if (provider === "claude-agent") {
+      // Latch the whole accepted turn, including pre-send setup, retry backoff,
+      // and the short queue-to-execution window. A later attempt must not start
+      // after /stop merely because no Query existed at that instant.
+      turnCancelEpoch++;
+      if (turnRunning) cancelRequested = true;
+      if (activeRun && typeof activeRun.cancel === "function") {
+        return cancelAttachedRun(activeRun);
+      }
+      return true;
+    }
+    // Cursor keeps its existing behavior unless a concrete run explicitly
+    // exposes cancellation.
+    if (!turnRunning || !turnCanCancel || typeof activeRun?.cancel !== "function") return false;
+    cancelRequested = true;
+    return cancelAttachedRun(activeRun);
+  };
+
   const session: ChatSession = {
     sessionId,
     cfg,
@@ -634,9 +701,27 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
           log(
             `[chat] ${label} failed — turn outcome preserved: ${e instanceof Error ? e.message : String(e)}`
           );
-          opts.onStoreDegraded?.(label);
+          onStoreDegraded?.(label);
         }
       };
+      const cancelledOutcome = (partialText = ""): TurnOutcome => ({
+        kind: "error",
+        message: "turn cancelled",
+        fatal: false,
+        partialAssistantText: partialText.trim() ? partialText : undefined,
+      });
+      const persistCancelledSession = () =>
+        persistSoft("upsertSession (cancelled)", async () =>
+          store.upsertSession({
+            id: sessionId,
+            title: await resolveSessionTitle(store, sessionId, msg),
+            cwd: sessionCwd,
+            runtime: sessionRuntime,
+            sdk_agent_id: agent.agentId ?? null,
+            last_status: "cancelled",
+            channel: sessionChannel,
+          })
+        );
 
       log(
         `[chat] sendTurn session=${sessionId} agent=${agent.agentId ?? "-"} userChars=${msg.length} composedChars=${sendMsg.length} replayPrefixChars=${replayPrefix.length}`
@@ -657,9 +742,12 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
       ): Promise<boolean> => {
         const previousAgentId = agent.agentId ?? null;
         const previousAgent = agent;
+        const previousAgentWasBroken = agentBroken;
         log(`[chat] rotate start reason=${reason} oldAgent=${previousAgentId ?? "-"}`);
         opts.onAgentRotating?.({ reason });
-        if (!rotateOpts.preserveOldOnFailure) await disposeAgent(previousAgent);
+        if (!rotateOpts.preserveOldOnFailure && !previousAgentWasBroken) {
+          await disposeAgent(previousAgent);
+        }
         let next: AgentLike;
         try {
           next = await createSession(sdk, {
@@ -723,7 +811,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
         attemptSendMsg = prefix
           ? prefix + "Continue. New request:\n\n" + coreSendMsg
           : coreSendMsg;
-        opts.onTurnRetry?.(reason);
+        onTurnRetry?.(reason);
         return true;
       };
 
@@ -732,6 +820,84 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
         if (rotated) return false;
         rotated = true;
         return rotateAgent(reason);
+      };
+
+      /**
+       * Context-window overflow: hand off, then compact — instead of rotating.
+       *
+       * Rotation "works" for an over-long session (the new agent accepts the turn)
+       * but at a cost nobody is told about: the SDK session is discarded and only
+       * the last 4 run previews are replayed, so a months-long chat silently
+       * restarts as a 6 KB stub. `/compact` is the SDK's own manual-compaction
+       * trigger — it sheds history while KEEPING the session and the model's
+       * summary of it, which is what a long-running companion session actually
+       * needs (see isCompactCommand above).
+       *
+       * Order matters. The handoff note is written FIRST, from the run store, with
+       * no model call — it is the black box that survives even if the compact call
+       * itself dies. Then `/compact` goes to the SDK verbatim (it must not be
+       * wrapped in preTurn/memory blocks or the trigger stops matching). Then the
+       * caller retries the ORIGINAL user message on the same agent.
+       *
+       * Returns false when compaction is unavailable or fails, so the caller falls
+       * through to the existing rotation path — degraded, but never a hard error.
+       * Shares no budget with rotation but is itself once-per-turn.
+       */
+      let compacted = false;
+      const tryCompactOnContextOverflow = async (reason: string): Promise<boolean> => {
+        if (compacted) return false;
+        compacted = true;
+        log(`[chat] context overflow — handoff + compact reason=${reason}`);
+
+        let handoffNote: string | undefined;
+        try {
+          const memoryStore = createMemoryStore(dir, cfg.stateDir);
+          try {
+            handoffNote = await writeSessionHandoff(store, memoryStore, sessionId, {
+              reason,
+              channel: sessionChannel,
+            });
+          } finally {
+            await memoryStore.close();
+          }
+          log(`[chat] handoff written note=${handoffNote ?? "-"}`);
+        } catch (e) {
+          // Non-fatal: losing the note is bad, losing the compact is worse.
+          log(
+            `[chat] handoff write failed — compacting anyway: ${e instanceof Error ? e.message : String(e)}`
+          );
+        }
+
+        try {
+          const compactRun = await sendAgentTurn(agent, "/compact", cfg.model, {});
+          await consumeRunStream(compactRun, () => {});
+          const res = await compactRun.wait();
+          if (String(res.status) === "error") {
+            log(`[chat] compact failed (run error) — falling back to rotation`);
+            return false;
+          }
+        } catch (e) {
+          log(
+            `[chat] compact failed — falling back to rotation: ${e instanceof Error ? e.message : String(e)}`
+          );
+          return false;
+        }
+
+        log(`[chat] compact ok — retrying original turn on the same agent`);
+        // A compact is the other moment the agent "wakes up": history just got
+        // summarized away, so re-brief it exactly as on a first turn.
+        const briefBlocks = await soft("cogit brief (post-compact)", [] as string[], () =>
+          cogitBriefBlocks(cfg)
+        );
+        if (briefBlocks.length) log(`[chat] post-compact cogit brief chars=${briefBlocks.join("").length}`);
+        // Retry the plain composed message: the pre-compact prompt may have carried
+        // a replay prefix that the compacted session no longer needs.
+        attemptSendMsg = briefBlocks.length
+          ? `${briefBlocks.join("\n\n")}\n\n${coreSendMsg}`
+          : coreSendMsg;
+        onTurnRetry?.(reason);
+        opts.onSessionCompacted?.({ sessionId, reason, handoffNote });
+        return true;
       };
 
       /**
@@ -784,23 +950,32 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
       }
 
       for (;;) {
+        if (cancelRequested) {
+          await persistCancelledSession();
+          return cancelledOutcome();
+        }
         const runId = newId("run");
         const startedAt = nowIso();
         const turnStartMs = Date.now();
         let toolCalls = 0;
         let usage: StreamUsage = {};
         let turnText = "";
+        let run: RunLike | undefined;
         const attempt = rotated ? 2 : 1;
         log(
           `[chat] run send attempt=${attempt} runId=${runId} promptChars=${attemptSendMsg.length} agent=${agent.agentId ?? "-"}`
         );
+        turnCanCancel = true;
+        cancelPromise = undefined;
         try {
-          const run: RunLike = await sendAgentTurn(agent, attemptSendMsg, cfg.model, {
+          run = await sendAgentTurn(agent, attemptSendMsg, cfg.model, {
             onDelta: ({ update }) => {
               const u = parseStreamUsage(update);
               if (u) usage = { ...usage, ...u };
             },
           });
+          activeRun = run;
+          if (cancelRequested) await cancelAttachedRun(run);
           await consumeRunStream(run, (ev) => {
             const activity = eventActivityDetail(ev);
             if (activity) {
@@ -824,7 +999,10 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
             }
           });
           const res = await run.wait();
-          const lastStatus = String(res.status);
+          turnCanCancel = false;
+          if (activeRun === run) activeRun = undefined;
+          const wasCancelled = cancelRequested;
+          const lastStatus = wasCancelled ? "cancelled" : String(res.status);
           const stats: TurnStats = {
             durationMs: Date.now() - turnStartMs,
             toolCalls,
@@ -835,7 +1013,9 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
             `[chat] run done sdkRun=${res.id ?? "-"} status=${lastStatus} tools=${toolCalls} assistantChars=${turnText.length} ${stats.durationMs}ms in=${usage.inputTokens ?? "-"} out=${usage.outputTokens ?? "-"}`
           );
           const runErrorDetail =
-            lastStatus === "error"
+            wasCancelled
+              ? "turn cancelled"
+              : lastStatus === "error"
               ? formatErrorDetail([
                   pickRunErrorDetail(res),
                   `tools=${toolCalls}`,
@@ -851,7 +1031,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
               prompt_preview: preview(msg),
               result_preview: resultPreview(turnText),
               status: lastStatus,
-              error_kind: lastStatus === "error" ? "run_error" : null,
+              error_kind: wasCancelled ? "cancelled" : lastStatus === "error" ? "run_error" : null,
               error_detail: runErrorDetail,
               started_at: startedAt,
               finished_at: nowIso(),
@@ -876,6 +1056,11 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
               channel: sessionChannel,
             })
           );
+          if (wasCancelled || cancelRequested) {
+            if (!wasCancelled) await persistCancelledSession();
+            log(`[chat] sendTurn cancelled assistantChars=${turnText.length}`);
+            return cancelledOutcome(turnText);
+          }
           if (lastStatus === "error") {
             const detail = pickRunErrorDetail(res);
             // claude-agent delivers upstream failures as `is_error` RESULT
@@ -895,7 +1080,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
                 log(
                   `[chat] sendTurn overload retry (run result) attempt=${overloadAttempts} delayMs=${delayMs}`
                 );
-                opts.onTurnRetry?.(`run_error overload ${detail}`);
+                onTurnRetry?.(`run_error overload ${detail}`);
                 await sleep(delayMs);
                 continue;
               }
@@ -928,6 +1113,15 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
             ) {
               continue;
             }
+            // Overflow before rotation: compacting keeps the session, rotating throws it away.
+            if (
+              isContextOverflowErrorText(detail) &&
+              toolCalls === 0 &&
+              turnText.length === 0 &&
+              (await tryCompactOnContextOverflow(rotateReason))
+            ) {
+              continue;
+            }
             if (toolCalls === 0 && turnText.length === 0 && (await tryRotateAgent(rotateReason))) {
               continue;
             }
@@ -948,6 +1142,42 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
           }
           return { kind: "ok", status: lastStatus, assistantText: turnText, stats };
         } catch (e) {
+          turnCanCancel = false;
+          if (activeRun === run) activeRun = undefined;
+          if (cancelRequested) {
+            log(`[chat] sendTurn cancelled assistantChars=${turnText.length}`);
+            await persistSoft("recordRun (cancel path)", () =>
+              store.recordRun({
+                id: runId,
+                session_id: sessionId,
+                sdk_agent_id: agent.agentId ?? null,
+                sdk_run_id: null,
+                prompt_preview: preview(msg),
+                result_preview: resultPreview(turnText),
+                status: "cancelled",
+                error_kind: "cancelled",
+                error_detail: "turn cancelled",
+                started_at: startedAt,
+                finished_at: nowIso(),
+                cwd: sessionCwd,
+                runtime: sessionRuntime,
+                model: cfg.model,
+                ...runLogMeta(),
+              })
+            );
+            await persistSoft("upsertSession (cancel path)", async () =>
+              store.upsertSession({
+                id: sessionId,
+                title: await resolveSessionTitle(store, sessionId, msg),
+                cwd: sessionCwd,
+                runtime: sessionRuntime,
+                sdk_agent_id: agent.agentId ?? null,
+                last_status: "cancelled",
+                channel: sessionChannel,
+              })
+            );
+            return cancelledOutcome(turnText);
+          }
           const formatted = formatSdkError(e);
           const rotateReason = `exception kind=${formatted.errorKind} ${formatted.message}`;
           log(`[chat] sendTurn error kind=${formatted.errorKind} ${formatted.message}`);
@@ -971,6 +1201,10 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
               ...runLogMeta(),
             })
           );
+          if (cancelRequested) {
+            await persistCancelledSession();
+            return cancelledOutcome(turnText);
+          }
           // Transient capacity errors (529/429/503, I-127) aren't fixed by rotating
           // the session — retry the SAME turn in place after a short backoff (I-133).
           // Guarded to early failures only (no partial output/tool calls yet): once a
@@ -985,7 +1219,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
             const delayMs = overloadDelaysMs[overloadAttempts];
             overloadAttempts++;
             log(`[chat] sendTurn overload retry attempt=${overloadAttempts} delayMs=${delayMs}`);
-            opts.onTurnRetry?.(rotateReason);
+            onTurnRetry?.(rotateReason);
             await sleep(delayMs);
             continue;
           }
@@ -995,6 +1229,16 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
             toolCalls === 0 &&
             turnText.length === 0 &&
             (await tryRotateOnAuthFailure(rotateReason))
+          ) {
+            continue;
+          }
+
+          // Overflow before rotation: compacting keeps the session, rotating throws it away.
+          if (
+            toolCalls === 0 &&
+            turnText.length === 0 &&
+            isContextOverflowErrorText(formatted.message) &&
+            (await tryCompactOnContextOverflow(rotateReason))
           ) {
             continue;
           }
@@ -1028,6 +1272,9 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
         }
       }
     },
+    cancelActiveTurn(): Promise<boolean> {
+      return requestActiveTurnCancellation();
+    },
     async injectContext(userLabel: string, assistantText: string): Promise<void> {
       const label = userLabel.trim();
       const body = assistantText.trim();
@@ -1052,9 +1299,16 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
       lastAgentTouchAt = Date.now();
       log(`[chat] injectContext session=${sessionId} labelChars=${label.length} bodyChars=${body.length}`);
     },
-    async close(): Promise<void> {
-      await disposeAgent(agent);
-      await store.close();
+    close(): Promise<void> {
+      if (!closePromise) {
+        closePromise = (async () => {
+          const cancellation = requestActiveTurnCancellation();
+          await Promise.all([cancellation, operationChain]);
+          if (!agentBroken) await disposeAgent(agent);
+          await store.close();
+        })();
+      }
+      return closePromise;
     },
   };
 
@@ -1071,17 +1325,15 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
         /* snapshot write failure must not affect the turn */
       }
     };
-    // Retry/degrade fire via session-level opts callbacks, which the turn loop
-    // reads at call time — wrapping the properties here (I-150) feeds the pet
-    // without threading the tracker through sendTurn. opts is this session's
-    // own options bag; the original callbacks keep running.
-    const prevRetry = opts.onTurnRetry;
-    opts.onTurnRetry = (reason) => {
+    // Retry/degrade fire through local callbacks read by the turn loop. Keep
+    // caller-owned options immutable while interposing the pet hooks (I-150).
+    const prevRetry = onTurnRetry;
+    onTurnRetry = (reason) => {
       if (!reason?.startsWith("idle_ttl")) pet(() => petTracker.noteRetry());
       prevRetry?.(reason);
     };
-    const prevDegraded = opts.onStoreDegraded;
-    opts.onStoreDegraded = (label) => {
+    const prevDegraded = onStoreDegraded;
+    onStoreDegraded = (label) => {
       pet(() => petTracker.noteStoreDegraded());
       prevDegraded?.(label);
     };
@@ -1108,6 +1360,67 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
       }
     };
   }
+
+  // One owner, one operation at a time. Cancellation deliberately bypasses this
+  // chain so /stop and shutdown can interrupt the current SDK run; persistence,
+  // rotations and disposal remain serialized and single-owner.
+  const runTurn = session.sendTurn.bind(session);
+  session.sendTurn = (userMessage, turnHooks) => {
+    if (closePromise) {
+      return Promise.resolve({
+        kind: "error",
+        message: "session is closing or closed",
+        fatal: true,
+      });
+    }
+    const acceptedCancelEpoch = turnCancelEpoch;
+    queuedTurns++;
+    const operation: Promise<TurnOutcome> = operationChain.then(async (): Promise<TurnOutcome> => {
+      queuedTurns--;
+      if (closePromise) {
+        return {
+          kind: "error",
+          message: "session is closing or closed",
+          fatal: true,
+        };
+      }
+      if (acceptedCancelEpoch !== turnCancelEpoch) {
+        return { kind: "error", message: "turn cancelled", fatal: false };
+      }
+      turnRunning = true;
+      turnCanCancel = false;
+      cancelRequested = false;
+      activeRun = undefined;
+      cancelPromise = undefined;
+      try {
+        return await runTurn(userMessage, turnHooks);
+      } finally {
+        turnRunning = false;
+        turnCanCancel = false;
+        cancelRequested = false;
+        activeRun = undefined;
+        cancelPromise = undefined;
+      }
+    });
+    operationChain = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  };
+  const injectContext = session.injectContext.bind(session);
+  session.injectContext = (userLabel, assistantText) => {
+    if (closePromise) return Promise.reject(new Error("session is closing or closed"));
+    const operation = operationChain.then(() => {
+      if (closePromise) throw new Error("session is closing or closed");
+      return injectContext(userLabel, assistantText);
+    });
+    operationChain = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  };
 
   return { ok: true, session };
 }

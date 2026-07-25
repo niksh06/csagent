@@ -1,5 +1,5 @@
 /**
- * Merge user MCP servers with built-in csagent-memory and csagent-browser.
+ * Merge user MCP servers with built-in csagent-memory and irida-browser.
  */
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -12,7 +12,7 @@ import type { McpServers } from "./host.js";
 import { pgUrl } from "./pg/pool.js";
 
 export const MEMORY_MCP_NAME = "csagent-memory";
-export const BROWSER_MCP_NAME = "csagent-browser";
+export const BROWSER_MCP_NAME = "irida-browser";
 export const CRON_MCP_NAME = "csagent-cron";
 export const ASK_MCP_NAME = "csagent-ask";
 export const HOMEBASE_MCP_NAME = "csagent-homebase";

@@ -4,6 +4,7 @@
 import { readMemory } from "./memory.js";
 import { createMemoryStore } from "./memoryStore.js";
 import type { AgentConfig } from "./config.js";
+import { cogitBriefBlocks } from "./cogitBrief.js";
 
 export type TurnMode = "advice" | "do" | "debug" | "sync";
 
@@ -129,6 +130,11 @@ export async function buildPreTurnBlocks(args: {
   cfg: AgentConfig;
   rawMessage: string;
   includeProfile: boolean;
+  /**
+   * First turn of the session — also gates the cogit belief brief. Separate from
+   * `includeProfile` so a deployment can keep one without the other.
+   */
+  isFirstTurn?: boolean;
   /** Owning channel — gateway channels get the ask_user/defer_followup steer. */
   channel?: string;
 }): Promise<{ taskText: string; blocks: string[] }> {
@@ -145,5 +151,6 @@ export async function buildPreTurnBlocks(args: {
     const profile = await preTurnProfileBlock(args.dir, args.cfg);
     if (profile) blocks.push(profile);
   }
+  if (args.isFirstTurn) blocks.push(...(await cogitBriefBlocks(args.cfg)));
   return { taskText, blocks };
 }

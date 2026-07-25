@@ -1,5 +1,5 @@
 /**
- * csagent-browser MCP runtime context (env + config-derived paths).
+ * irida-browser MCP runtime context (env + config-derived paths).
  */
 import { resolve } from "node:path";
 import { loadConfig, resolveMemoryRoot } from "../config.js";

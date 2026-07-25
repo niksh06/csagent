@@ -47,6 +47,8 @@ export class StartupError extends Error {}
 // ── Interactive session shapes (issue 009) ───────────────────────────────
 export interface RunLike {
   stream?(): AsyncIterable<unknown>;
+  /** Request cancellation of an in-flight run when the engine supports it. */
+  cancel?: () => Promise<void> | void;
   /** `error` carries the failure detail when status === "error" (read via pickRunErrorDetail). */
   wait(): Promise<{ status: string; id?: string; error?: string }>;
 }

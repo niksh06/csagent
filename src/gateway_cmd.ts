@@ -92,30 +92,58 @@ export async function startGateway(opts: GatewayRunOptions = {}): Promise<Gatewa
         "error"
       );
     }
+    let closePromise: Promise<void> | undefined;
     return {
       cfg,
       router,
       telegram,
       webhook,
-      close: async () => {
-        clearInterval(allowlistRewarm);
-        await telegram.stop();
-        await router.closeAll();
-        await webhook?.close().catch(() => {});
+      close: () => {
+        if (!closePromise) {
+          clearInterval(allowlistRewarm);
+          // Stop accepting work first, then cancel/close sessions immediately:
+          // both ingress drains may be waiting on those active turns.
+          const telegramStop = telegram.stop();
+          const webhookStop = webhook?.close().catch(() => {}) ?? Promise.resolve();
+          const sessionsClose = router.closeAll();
+          closePromise = (async () => {
+            const [telegramResult, , sessionsResult] = await Promise.allSettled([
+              telegramStop,
+              webhookStop,
+              sessionsClose,
+            ]);
+            if (sessionsResult.status === "rejected") throw sessionsResult.reason;
+            if (telegramResult.status === "rejected") throw telegramResult.reason;
+          })();
+        }
+        return closePromise;
       },
     };
   }
 
   const webhook = await listenWebhook(cfg, router, dir);
+  let closePromise: Promise<void> | undefined;
 
   return {
     cfg,
     router,
     webhook,
-    close: async () => {
-      clearInterval(allowlistRewarm);
-      await router.closeAll();
-      await webhook.close();
+    close: () => {
+      if (!closePromise) {
+        clearInterval(allowlistRewarm);
+        const ingressClose = webhook.close();
+        const sessionsClose = router.closeAll();
+        closePromise = (async () => {
+          const [ingressResult, sessionsResult] = await Promise.allSettled([
+            ingressClose,
+            sessionsClose,
+          ]);
+          // Preserve the former try/finally priority when both fail.
+          if (sessionsResult.status === "rejected") throw sessionsResult.reason;
+          if (ingressResult.status === "rejected") throw ingressResult.reason;
+        })();
+      }
+      return closePromise;
     },
   };
 }

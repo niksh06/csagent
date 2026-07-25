@@ -4,6 +4,7 @@
  */
 import {
   createSession,
+  disposeAgent,
   resumeSession,
   StartupError,
   type AgentLike,
@@ -80,10 +81,15 @@ export async function connectAgentForSession(
     cwd,
     mcpServers,
   });
-  return {
-    agent,
-    mode: "replayed",
-    replayPrefix: await replayPreamble(store, session.id),
-    liveResumeError: redactedLiveResumeError,
-  };
+  try {
+    return {
+      agent,
+      mode: "replayed",
+      replayPrefix: await replayPreamble(store, session.id),
+      liveResumeError: redactedLiveResumeError,
+    };
+  } catch (e) {
+    await disposeAgent(agent);
+    throw e;
+  }
 }

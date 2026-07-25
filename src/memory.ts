@@ -169,14 +169,16 @@ export async function sessionStartMemoryBlocks(
       const notes = filterNotesByWings(await store.listNotes(), MEMORY_ARCHIVE_WINGS);
       if (notes.length > 0) {
         for (const n of notes) {
-          if (total + n.body.length > maxChars) break;
+          // Skip over-budget notes rather than stopping — one fat note must not
+          // silently swallow every note behind it (same fix as autoRag.ts).
+          if (total + n.body.length > maxChars) continue;
           blocks.push(formatMemoryBlock(n.name, n.body, { updatedAt: n.updated_at, stalenessDays }));
           total += n.body.length;
         }
       } else {
         for (const entry of listMemories(dir)) {
           const body = readMemory(dir, entry.name);
-          if (total + body.length > maxChars) break;
+          if (total + body.length > maxChars) continue;
           blocks.push(formatMemoryBlock(entry.name, body));
           total += body.length;
         }
@@ -189,7 +191,7 @@ export async function sessionStartMemoryBlocks(
       if (!name || name === "*") continue;
       const loaded = await loadOne(name);
       if (!loaded) continue;
-      if (total + loaded.body.length > maxChars) break;
+      if (total + loaded.body.length > maxChars) continue;
       blocks.push(formatMemoryBlock(name, loaded.body, { updatedAt: loaded.updatedAt, stalenessDays }));
       total += loaded.body.length;
     }

@@ -146,6 +146,7 @@ function buildListSessionsSqlite(opts: ListSessionsOptions | undefined, limit: n
 export class SqliteStore implements IStore {
   private db: DatabaseSync;
   private readonly stateRoot: string;
+  private closed = false;
 
   constructor(dir: string, stateDir: string) {
     this.stateRoot = resolve(dir, stateDir);
@@ -308,6 +309,8 @@ export class SqliteStore implements IStore {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     releaseSharedSqliteDb(this.stateRoot);
   }
 }

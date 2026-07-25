@@ -1,5 +1,5 @@
 /**
- * csagent-browser MCP tool handlers (shared by stdio server and tests).
+ * irida-browser MCP tool handlers (shared by stdio server and tests).
  */
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

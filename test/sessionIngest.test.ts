@@ -16,6 +16,7 @@ import {
 import type { SessionRecord, RunRecord } from "../src/store.js";
 import { executeCronJob } from "../src/cronEngine.js";
 import { autoRagMemoryBlocks } from "../src/autoRag.js";
+import { sessionStartMemoryBlocks } from "../src/memory.js";
 import { composePrompt } from "../src/composePrompt.js";
 import type { AgentConfig } from "../src/config.js";
 
@@ -293,6 +294,124 @@ test("autoRagMemoryBlocks logs hits when CSAGENT_LOG=1", async () => {
     if (prevLog === undefined) delete process.env.CSAGENT_LOG;
     else process.env.CSAGENT_LOG = prevLog;
   }
+});
+
+// An oversized top hit used to `break` the selection loop, so autoRag returned zero
+// blocks even when smaller relevant notes were sitting right behind it — the agent got
+// no memory at all and nothing in the prompt said so. Regression guard for that.
+test("autoRagMemoryBlocks skips an oversized hit instead of dropping the whole injection", async () => {
+  const dir = tmp();
+  const memory = createMemoryStore(dir, ".agent");
+  await memory.upsertNote({
+    name: "ops.small",
+    wing: "default",
+    title: "Gateway ops",
+    body: "# Gateway\n\nTelegram outbox drains on every poll.",
+  });
+  // searchNotes orders by updated_at DESC — the gap makes the oversized note hit #1.
+  await new Promise((r) => setTimeout(r, 5));
+  await memory.upsertNote({
+    name: "ops.huge",
+    wing: "default",
+    title: "Gateway ops dump",
+    body: `# Gateway\n\nTelegram outbox drains on every poll.\n\n${"padding ".repeat(500)}`,
+  });
+  // Precondition — assert the oversized note really ranks first, else this test is vacuous.
+  const ranked = await memory.searchNotes("telegram outbox", 5);
+  assert.equal(ranked[0]?.name, "ops.huge");
+  await memory.close();
+
+  const cfg: AgentConfig = {
+    model: "m",
+    runtime: "local",
+    cwd: dir,
+    skillsPath: "skills",
+    stateDir: ".agent",
+    mcpServers: {},
+    safety: { allowCloud: false, allowAutoPr: false },
+    memory: { autoRag: { enabled: true, limit: 3, maxChars: 1000 } },
+    browser: {},
+  };
+
+  const blocks = await autoRagMemoryBlocks(dir, "telegram outbox", cfg);
+  assert.equal(blocks.length, 1, "the small note must survive the oversized one");
+  assert.match(blocks[0]!, /Telegram outbox drains/);
+  assert.ok(!blocks[0]!.includes("padding"), "the oversized note must not be injected");
+});
+
+test("autoRagMemoryBlocks logs how many hits it dropped for size", async () => {
+  const dir = tmp();
+  const memory = createMemoryStore(dir, ".agent");
+  await memory.upsertNote({
+    name: "ops.small",
+    wing: "default",
+    title: "Gateway ops",
+    body: "# Gateway\n\nTelegram outbox drains on every poll.",
+  });
+  await new Promise((r) => setTimeout(r, 5));
+  await memory.upsertNote({
+    name: "ops.huge",
+    wing: "default",
+    title: "Gateway ops dump",
+    body: `# Gateway\n\nTelegram outbox drains on every poll.\n\n${"padding ".repeat(500)}`,
+  });
+  await memory.close();
+
+  const cfg: AgentConfig = {
+    model: "m",
+    runtime: "local",
+    cwd: dir,
+    skillsPath: "skills",
+    stateDir: ".agent",
+    mcpServers: {},
+    safety: { allowCloud: false, allowAutoPr: false },
+    memory: { autoRag: { enabled: true, limit: 3, maxChars: 1000 } },
+    browser: {},
+  };
+
+  const prevLog = process.env.CSAGENT_LOG;
+  process.env.CSAGENT_LOG = "1";
+  const captured: string[] = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    await autoRagMemoryBlocks(dir, "telegram outbox", cfg);
+    const joined = captured.join("");
+    assert.match(joined, /hits=1/);
+    assert.match(joined, /skipped=1/);
+  } finally {
+    process.stdout.write = origWrite;
+    if (prevLog === undefined) delete process.env.CSAGENT_LOG;
+    else process.env.CSAGENT_LOG = prevLog;
+  }
+});
+
+test("sessionStartMemoryBlocks skips an over-budget note instead of dropping the rest", async () => {
+  const dir = tmp();
+  const memory = createMemoryStore(dir, ".agent");
+  await memory.upsertNote({ name: "big", wing: "default", title: "Big", body: "x".repeat(3000) });
+  await memory.upsertNote({ name: "small", wing: "default", title: "Small", body: "keep me" });
+  await memory.close();
+
+  const cfg: AgentConfig = {
+    model: "m",
+    runtime: "local",
+    cwd: dir,
+    skillsPath: "skills",
+    stateDir: ".agent",
+    mcpServers: {},
+    safety: { allowCloud: false, allowAutoPr: false },
+    memory: { onStart: ["big", "small"], maxCharsPerTurn: 1000 },
+    browser: {},
+  };
+
+  const blocks = await sessionStartMemoryBlocks(dir, cfg);
+  assert.equal(blocks.length, 1);
+  assert.match(blocks[0]!, /keep me/);
 });
 
 test("ingestSessionRecord returns skipped for empty runs", async () => {

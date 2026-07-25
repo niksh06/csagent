@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * stdio MCP server: csagent-browser stealth tools for Cursor SDK agents.
+ * stdio MCP server: irida-browser stealth tools for Cursor SDK agents.
  */
 import { loadIridaEnv } from "../loadEnv.js";
 loadIridaEnv();
@@ -14,7 +14,7 @@ import { registerBrowserMcpTools } from "./browserTools.js";
 async function main(): Promise<void> {
   const ctx = resolveBrowserMcpContext();
   const server = new McpServer(
-    { name: "csagent-browser", version: "0.1.0" },
+    { name: "irida-browser", version: "0.1.0" },
     { capabilities: { tools: {} } }
   );
   registerBrowserMcpTools(server, ctx);

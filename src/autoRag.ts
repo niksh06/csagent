@@ -83,12 +83,19 @@ export async function autoRagMemoryBlocks(
     const blocks: string[] = [];
     const noteNames: string[] = [];
     let total = 0;
+    let skipped = 0;
     for (const note of notes) {
       if (note.wing === SECURE_WING) continue;
       if (note.body === "(encrypted — use memory show)") continue;
       if (opts.wings?.length && !opts.wings.includes(note.wing)) continue;
       const block = formatAutoRagBlock(note, config.memory?.stalenessDays);
-      if (total + block.length > opts.maxChars) break;
+      if (total + block.length > opts.maxChars) {
+        // Skip this note, don't stop the scan: a single oversized hit must not
+        // drop the whole injection. `break` here meant one fat top hit silently
+        // returned zero blocks — the agent got no memory and no way to notice.
+        skipped += 1;
+        continue;
+      }
       blocks.push(block);
       noteNames.push(note.name);
       total += block.length;
@@ -96,7 +103,7 @@ export async function autoRagMemoryBlocks(
     if (agentLogEnabled()) {
       const log = resolveAgentLogger({ component: "autoRag" });
       const names = noteNames.length ? noteNames.join(",") : "-";
-      log(`hits=${blocks.length} chars=${total} notes=${names}`);
+      log(`hits=${blocks.length} chars=${total} skipped=${skipped} notes=${names}`);
     }
     return blocks;
   } finally {

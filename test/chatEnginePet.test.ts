@@ -41,6 +41,35 @@ function sdkOf(): SdkCreateLike {
 }
 
 describe("Wisp bridge in sendTurn (I-146)", () => {
+  it("does not mutate a frozen caller options object while wiring pet callbacks", async () => {
+    await withKey(async () => {
+      const dir = mkdtempSync(resolve(tmpdir(), "pet-frozen-"));
+      let disposeCalls = 0;
+      const sdk: SdkCreateLike = {
+        create: async () => ({
+          agentId: "agent-frozen",
+          send: async () => runWithTool("answered"),
+          [Symbol.asyncDispose]: async () => {
+            disposeCalls++;
+          },
+        }),
+      };
+      const opts = Object.freeze({
+        sdk,
+        dir,
+        interactive: false,
+        onTurnRetry: () => {},
+        onStoreDegraded: () => {},
+      });
+
+      const opened = await openChatSession(opts);
+      assert.equal(opened.ok, true);
+      if (!opened.ok) return;
+      await opened.session.close();
+      assert.equal(disposeCalls, 1);
+    });
+  });
+
   it("a completed turn persists the snapshot: activity seen, happy at end", async () => {
     await withKey(async () => {
       const dir = mkdtempSync(resolve(tmpdir(), "pet-wire-"));

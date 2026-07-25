@@ -41,7 +41,15 @@ export interface GatewayRouterOptions {
   yesIUnderstand?: boolean;
   sdk?: SdkCreateLike & SdkResumeLike;
   onLog?: (line: string, level?: import("./serviceLog.js").ServiceLogLevel) => void;
+  /** Maximum shutdown wait for sessions that have not finished opening. */
+  openingCloseGraceMs?: number;
 }
+
+const OPENING_CLOSE_GRACE_MS = 1_000;
+
+/** Shown once, on the reply of the turn during which the context was compacted. */
+const COMPACT_NOTICE =
+  "🧠 _Контекст переполнился — сжал историю и записал handoff. Детали прошлых ходов теперь в пересказе, не дословно._";
 
 export class GatewaySessionRouter {
   private readonly dir: string;
@@ -50,9 +58,16 @@ export class GatewaySessionRouter {
   private readonly yesIUnderstand: boolean;
   private readonly sdk?: SdkCreateLike & SdkResumeLike;
   private readonly onLog: (line: string) => void;
+  /** Pending "I just compacted" notices, keyed by peer; consumed by the next reply. */
+  private readonly compactNotice = new Map<string, string>();
+  private readonly openingCloseGraceMs: number;
   private peers: GatewayPeersFile;
   private active = new Map<string, ChatSession>();
+  private opening = new Map<string, Promise<ChatSession>>();
   private busy = new Set<string>();
+  private cancelEpoch = new Map<string, number>();
+  private closing = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(opts: GatewayRouterOptions) {
     this.dir = opts.dir;
@@ -61,11 +76,24 @@ export class GatewaySessionRouter {
     this.yesIUnderstand = opts.yesIUnderstand ?? false;
     this.sdk = opts.sdk;
     this.onLog = opts.onLog ?? defaultServiceLogSink;
+    this.openingCloseGraceMs = Math.max(0, opts.openingCloseGraceMs ?? OPENING_CLOSE_GRACE_MS);
     this.peers = loadGatewayPeers(opts.dir);
   }
 
   isBusy(chatId: string): boolean {
     return this.busy.has(peerKey(this.adapter, chatId));
+  }
+
+  /** Cancel/latch only existing inbound work; /stop must never create a session. */
+  async cancelActive(chatId: string): Promise<boolean> {
+    const key = peerKey(this.adapter, chatId);
+    const inFlight = this.busy.has(key) || this.opening.has(key);
+    if (inFlight) this.cancelEpoch.set(key, (this.cancelEpoch.get(key) ?? 0) + 1);
+    const session = this.active.get(key);
+    const cancelled = session ? await session.cancelActiveTurn() : false;
+    // Before a session exists the epoch latch guarantees no SDK send. Once an
+    // active session owns the turn, report only real engine cancellation.
+    return cancelled || (!session && inFlight);
   }
 
   /** Drop cached SDK session for a peer; next inbound creates a fresh sess_. */
@@ -84,9 +112,22 @@ export class GatewaySessionRouter {
 
   async getOrCreateSession(chatId: string): Promise<ChatSession> {
     const key = peerKey(this.adapter, chatId);
+    if (this.closing) throw new GatewayRouterError("gateway router is closing");
     const cached = this.active.get(key);
     if (cached) return cached;
+    const pending = this.opening.get(key);
+    if (pending) return pending;
 
+    const opening = this.openSession(key, chatId);
+    this.opening.set(key, opening);
+    try {
+      return await opening;
+    } finally {
+      if (this.opening.get(key) === opening) this.opening.delete(key);
+    }
+  }
+
+  private async openSession(key: string, chatId: string): Promise<ChatSession> {
     const resumeId = this.peers.peers[key];
     // Sticky per-chat engine (I-143) overrides agent.config.json's provider.
     const chatEngine = getChatEngine(this.dir, this.adapter, chatId);
@@ -101,14 +142,33 @@ export class GatewaySessionRouter {
       gatewayPeer: { adapter: this.adapter, chatId },
       engine: chatEngine,
       onLog: this.onLog,
+      onSessionCompacted: (info) => {
+        this.onLog(
+          `[gateway] session compacted chat=${chatId} reason=${info.reason} handoff=${info.handoffNote ?? "-"}`
+        );
+        this.compactNotice.set(key, COMPACT_NOTICE);
+      },
     });
     if (!opened.ok) {
       throw new GatewayRouterError(opened.message);
     }
-    this.peers.peers[key] = opened.session.sessionId;
-    saveGatewayPeers(this.dir, this.peers);
-    this.active.set(key, opened.session);
-    return opened.session;
+    if (this.closing) {
+      await opened.session.close();
+      throw new GatewayRouterError("gateway router is closing");
+    }
+
+    const previousSessionId = this.peers.peers[key];
+    try {
+      this.peers.peers[key] = opened.session.sessionId;
+      saveGatewayPeers(this.dir, this.peers);
+      this.active.set(key, opened.session);
+      return opened.session;
+    } catch (e) {
+      if (previousSessionId === undefined) delete this.peers.peers[key];
+      else this.peers.peers[key] = previousSessionId;
+      await opened.session.close().catch(() => {});
+      throw e;
+    }
   }
 
   async handleInbound(
@@ -120,6 +180,8 @@ export class GatewaySessionRouter {
     if (this.busy.has(key)) {
       throw new GatewayRouterError("peer busy — previous turn still running", "busy");
     }
+    const inboundCancelEpoch = this.cancelEpoch.get(key) ?? 0;
+    const wasCancelled = () => (this.cancelEpoch.get(key) ?? 0) !== inboundCancelEpoch;
     this.busy.add(key);
     try {
       if (text.trim() === "/new") {
@@ -151,6 +213,7 @@ export class GatewaySessionRouter {
         if (slashReply) return { reply: slashReply };
       }
       const session = await this.getOrCreateSession(chatId);
+      if (wasCancelled()) throw new GatewayRouterError("turn cancelled");
       const followup = parseDigestFollowup(text);
       let turnText = followup?.prompt ?? text;
       if (followup) {
@@ -168,8 +231,16 @@ export class GatewaySessionRouter {
         clearPendingQuestion(this.dir, this.adapter, chatId);
         this.onLog(`[gateway] answering parked question chat=${chatId}`);
       }
+      if (wasCancelled()) throw new GatewayRouterError("turn cancelled");
       const out = await session.sendTurn(turnText, hooks);
-      if (out.kind === "ok") return { reply: out.assistantText };
+      // Say it out loud: the session just shed history mid-turn. Letting that
+      // happen silently is exactly the complaint this whole line of work started
+      // from — the user could not tell a forgetful companion from a reset one.
+      const notice = this.compactNotice.get(key);
+      this.compactNotice.delete(key);
+      if (out.kind === "ok") {
+        return { reply: notice ? `${notice}\n\n${out.assistantText}` : out.assistantText };
+      }
       if (out.kind === "blocked") throw new GatewayRouterError(out.reason, "blocked");
       const partial = out.partialAssistantText?.trim();
       throw new GatewayRouterError(partial ? `${out.message}\n\n${partial}` : out.message);
@@ -178,9 +249,35 @@ export class GatewaySessionRouter {
     }
   }
 
-  async closeAll(): Promise<void> {
-    const closing = [...this.active.values()].map((s) => s.close());
-    this.active.clear();
-    await Promise.all(closing);
+  closeAll(): Promise<void> {
+    if (!this.closePromise) {
+      this.closing = true;
+      this.closePromise = (async () => {
+        // Start active cancellation immediately. A different peer's hung open
+        // must not delay stopping an already-running Claude Query.
+        const closing = [...this.active.values()].map((s) => s.close());
+        this.active.clear();
+        const openingDrain = Promise.allSettled([...this.opening.values()]);
+        let openingTimer: ReturnType<typeof setTimeout> | undefined;
+        const boundedOpeningDrain = Promise.race([
+          openingDrain.then(() => undefined),
+          new Promise<void>((resolve) => {
+            openingTimer = setTimeout(resolve, this.openingCloseGraceMs);
+          }),
+        ]).finally(() => {
+          if (openingTimer) clearTimeout(openingTimer);
+        });
+        const [, results] = await Promise.all([
+          boundedOpeningDrain,
+          Promise.allSettled(closing),
+        ]);
+        // A late open observes `closing` in openSession() and closes its own
+        // newly-created session; keep its eventual rejection handled here.
+        void openingDrain.catch(() => {});
+        const failed = results.find((result) => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+      })();
+    }
+    return this.closePromise;
   }
 }

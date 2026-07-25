@@ -184,7 +184,8 @@ function isInsideRoot(p: string, root: string): boolean {
 export function writeRootsViolation(
   toolName: string,
   input: Record<string, unknown>,
-  roots: string[]
+  roots: string[],
+  cwd: string = process.cwd()
 ): string | null {
   const field = WRITE_TOOL_PATH_FIELD[toolName];
   if (!field) return null; // not a path-gated mutation tool
@@ -192,9 +193,9 @@ export function writeRootsViolation(
   if (typeof raw !== "string" || !raw.trim()) {
     return `${toolName} without a verifiable ${field} is not allowed under a write-roots policy`;
   }
-  const target = resolvePath(raw.trim());
+  const target = resolvePath(cwd, raw.trim());
   for (const root of roots) {
-    if (isInsideRoot(target, resolvePath(root))) return null;
+    if (isInsideRoot(target, resolvePath(cwd, root))) return null;
   }
   return `${toolName} target ${target} is outside the allowed write roots (${roots.join(", ")})`;
 }
@@ -257,34 +258,60 @@ type QueryOptions = {
   disallowedTools?: string[];
   /** I-158: reasoning effort for the run (SDK: low|medium|high|xhigh|max). */
   effort?: string;
+  /** Which filesystem settings the SDK may load (see IRIDA_SETTING_SOURCES). */
+  settingSources?: string[];
 };
 
 /**
+ * Filesystem settings an Irida-spawned agent is allowed to inherit.
+ *
+ * The SDK's default (option omitted) is "load everything the CLI would" — which
+ * on a developer machine means the OPERATOR's personal `~/.claude` bleeds into
+ * every autonomous run: their MCP servers, their PreToolUse/SessionStart hooks,
+ * their Bash permission allow-list. Measured on the live Telegram session
+ * (2026-07-25): 14 MCP servers attached where Irida declares 5, four of the
+ * inherited ones failing to start on EVERY turn and burning the full 60s
+ * MCP_TIMEOUT before the agent could use any tool at all — median 65s of each
+ * turn spent tool-less, and 15% of turns finished before tools ever arrived.
+ * The agent experienced this as its tools "flickering" all day.
+ *
+ * `project` (not `[]`) is deliberate: it drops user scope — the actual problem —
+ * while still loading the repo's CLAUDE.md, which agents working inside the
+ * Irida checkout rely on. What an Irida agent gets is now Irida's decision,
+ * declared in `mcpServers`, not a side effect of whose machine it runs on.
+ */
+const IRIDA_SETTING_SOURCES = ["project"] as const;
+
+/**
  * Permission options for a `query()` call (I-94). Gate OFF → keep the prior
- * `bypassPermissions` (no behavior change). Gate ON (denyDestructive and/or
- * allowWriteRoots, I-157) → `default` mode so the SDK routes tool calls through
- * `canUseTool`: write-roots containment first (fail-closed), then the
- * destructive-input gate. `canUseTool` runs every turn and survives `resume`.
+ * `bypassPermissions` (no behavior change). Gate ON (denyDestructive,
+ * allowWriteRoots, or gateway ask steer) → `default` mode so the SDK routes tool
+ * calls through `canUseTool`: ask steer, write-roots containment (fail-closed),
+ * then the destructive-input gate. The callback survives `resume`.
  */
 function permissionOptions(
   denyDestructive: boolean,
   sanitizeInput = false,
-  allowWriteRoots?: string[]
+  allowWriteRoots?: string[],
+  cwd: string = process.cwd(),
+  steerInteractiveAsk = false
 ): Pick<QueryOptions, "permissionMode" | "canUseTool"> {
   const roots = allowWriteRoots?.filter((r) => typeof r === "string" && r.trim()) ?? [];
-  if (!denyDestructive && !roots.length) return { permissionMode: "bypassPermissions" };
+  if (!denyDestructive && !roots.length && !steerInteractiveAsk) {
+    return { permissionMode: "bypassPermissions" };
+  }
   return {
     permissionMode: "default",
     canUseTool: async (toolName, input) => {
       // I-125: deny the headless-broken interactive ask, steer to `ask_user`.
-      const steer = interceptInteractiveAsk(toolName);
+      const steer = steerInteractiveAsk ? interceptInteractiveAsk(toolName) : null;
       if (steer) {
         console.error(`[tool-policy] deny ${toolName}: steer to ask_user (I-125)`);
         return steer;
       }
       // I-157: path-scoped write envelope.
       if (roots.length) {
-        const violation = writeRootsViolation(toolName, input, roots);
+        const violation = writeRootsViolation(toolName, input, roots, cwd);
         if (violation) {
           console.error(`[tool-policy] deny ${toolName}: ${violation}`);
           return { behavior: "deny", message: `irida tool-policy: ${violation}` };
@@ -303,14 +330,31 @@ function permissionOptions(
   };
 }
 
-async function startQuery(message: string, options: QueryOptions): Promise<AsyncIterable<Record<string, unknown>>> {
+type ClaudeQuery = AsyncIterable<Record<string, unknown>> & {
+  interrupt?(): Promise<void>;
+  close?(): void;
+};
+
+const CLAUDE_CANCEL_GRACE_MS = 1_000;
+
+async function startQuery(message: string, options: QueryOptions): Promise<ClaudeQuery> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
-  return query({ prompt: message, options } as Parameters<typeof query>[0]) as AsyncIterable<Record<string, unknown>>;
+  return query({ prompt: message, options } as Parameters<typeof query>[0]) as ClaudeQuery;
+}
+
+/** Normalize success/error text across the Agent SDK result variants. */
+function claudeResultText(message: Record<string, unknown>): string {
+  if (typeof message.result === "string" && message.result.trim()) return message.result;
+  if (!Array.isArray(message.errors)) return "";
+  return message.errors
+    .filter((error): error is string => typeof error === "string" && Boolean(error.trim()))
+    .join(": ");
 }
 
 /** Drain an Agent SDK message stream into the SdkLike one-shot result shape. */
 async function collectOneShot(q: AsyncIterable<Record<string, unknown>>): Promise<SdkPromptResult> {
   let resultText = "";
+  let runId: string | undefined;
   let sessionId: string | undefined;
   let isError = false;
   let usage: StreamUsage | undefined;
@@ -320,27 +364,33 @@ async function collectOneShot(q: AsyncIterable<Record<string, unknown>>): Promis
     if (u) usage = { ...usage, ...u };
     if (m.type === "result") {
       isError = Boolean(m.is_error);
-      if (typeof m.result === "string") resultText = m.result;
+      resultText = claudeResultText(m);
+      if (typeof m.uuid === "string") runId = m.uuid;
     }
   }
   return {
     status: isError ? "error" : "finished",
     result: resultText,
-    id: sessionId,
+    id: runId,
     agentId: sessionId,
     ...(usage ? { usage } : {}),
   };
 }
 
-export function createClaudeAgentSdk(opts?: {
-  authMode?: EngineAuth;
-  toolPolicy?: EngineToolPolicy;
-}): ClaudeAgentSdk {
+export function createClaudeAgentSdk(
+  opts?: {
+    authMode?: EngineAuth;
+    toolPolicy?: EngineToolPolicy;
+  },
+  deps: { startQuery?: typeof startQuery; cancelGraceMs?: number } = {}
+): ClaudeAgentSdk {
   const authMode: EngineAuth = opts?.authMode ?? "api-key";
   const denyDestructive = opts?.toolPolicy?.denyDestructive ?? false;
   const sanitizeInput = opts?.toolPolicy?.sanitizeInput ?? false;
   const allowWriteRoots = opts?.toolPolicy?.allowWriteRoots;
   const effort = opts?.toolPolicy?.effort;
+  const runQuery = deps.startQuery ?? startQuery;
+  const cancelGraceMs = deps.cancelGraceMs ?? CLAUDE_CANCEL_GRACE_MS;
 
   /** Interactive agent handle: one Agent SDK session, resumed per turn. */
   function makeAgent(init: {
@@ -350,62 +400,192 @@ export function createClaudeAgentSdk(opts?: {
     mcpServers?: Record<string, unknown>;
     sessionId?: string;
   }): AgentLike {
+    type ActiveQuery = { close(): void; done: Promise<void> };
     let sessionId = init.sessionId;
+    let agentClosed = false;
+    let agentClosePromise: Promise<void> | undefined;
+    const activeQueries = new Set<ActiveQuery>();
     const agent: AgentLike = {
       agentId: sessionId,
       async send(message: string, sendOpts?: AgentSendOptions): Promise<RunLike> {
+        if (agentClosed) throw new Error("agent is closed");
         const model = sendOpts?.model?.id?.trim() || init.model;
-        const q = await startQuery(message, {
+        const q = await runQuery(message, {
           model,
           cwd: init.cwd,
           env: engineAuthEnv(authMode, init.apiKey),
-          ...permissionOptions(denyDestructive, sanitizeInput, allowWriteRoots),
+          ...permissionOptions(
+            denyDestructive,
+            sanitizeInput,
+            allowWriteRoots,
+            init.cwd,
+            Boolean(init.mcpServers?.["csagent-ask"])
+          ),
           ...(effort ? { effort } : {}),
+          settingSources: [...IRIDA_SETTING_SOURCES],
           ...(init.mcpServers ? { mcpServers: init.mcpServers } : {}),
           ...(sessionId ? { resume: sessionId } : {}),
         });
+        if (agentClosed) {
+          try {
+            q.close?.();
+          } catch {
+            // The owning agent is already closed; query cleanup is best-effort.
+          }
+          throw new Error("agent is closed");
+        }
 
         let status = "finished";
+        let runId: string | undefined;
         let sid = sessionId;
         let errorDetail: string | undefined;
-        let finished = false;
-        let resolveWait: () => void = () => {};
-        const waitP = new Promise<void>((r) => (resolveWait = r));
+        const events: Array<Record<string, unknown>> = [];
+        let completed = false;
+        let pumpFailed = false;
+        let pumpError: unknown;
+        let streamClaimed = false;
+        let resolveStream: (() => void) | undefined;
+        let queryClosed = false;
+        let cancelPromise: Promise<void> | undefined;
+
+        const wakeStream = () => {
+          const resolve = resolveStream;
+          resolveStream = undefined;
+          resolve?.();
+        };
+        const closeQuery = () => {
+          if (queryClosed) return;
+          q.close?.();
+          queryClosed = true;
+        };
+        const activeQuery: ActiveQuery = { close: closeQuery, done: Promise.resolve() };
+        activeQueries.add(activeQuery);
+
+        const pump = async () => {
+          try {
+            for await (const m of q) {
+              await sendOpts?.onDelta?.({ update: m });
+              if (typeof m.session_id === "string") {
+                sid = m.session_id;
+                agent.agentId = sid;
+              }
+              if (m.type === "result") {
+                const isErr = Boolean(m.is_error);
+                status = isErr ? "error" : "finished";
+                if (typeof m.uuid === "string") runId = m.uuid;
+                if (isErr) {
+                  const subtype = typeof m.subtype === "string" ? m.subtype : "";
+                  const txt = claudeResultText(m);
+                  errorDetail = [subtype, txt].filter(Boolean).join(": ") || "agent run error";
+                }
+              }
+              events.push(m);
+              wakeStream();
+            }
+          } catch (error) {
+            pumpFailed = true;
+            pumpError = error;
+            throw error;
+          } finally {
+            sessionId = sid; // persist for the next turn's resume
+            completed = true;
+            activeQueries.delete(activeQuery);
+            wakeStream();
+          }
+        };
+        const pumpPromise = pump();
+        activeQuery.done = pumpPromise;
+        // wait()/stream() surface this rejection; the eager pump must not create
+        // an unhandled rejection before either consumer attaches.
+        void pumpPromise.catch(() => {});
 
         const run: RunLike = {
           async *stream() {
+            if (streamClaimed) throw new Error("run stream already consumed");
+            streamClaimed = true;
+            let index = 0;
             try {
-              for await (const m of q) {
-                if (typeof m.session_id === "string") {
-                  sid = m.session_id;
-                  agent.agentId = sid;
+              for (;;) {
+                while (index < events.length) yield events[index++]!;
+                if (completed) {
+                  if (pumpFailed) throw pumpError;
+                  return;
                 }
-                if (m.type === "result") {
-                  const isErr = Boolean(m.is_error);
-                  status = isErr ? "error" : "finished";
-                  if (isErr) {
-                    const subtype = typeof m.subtype === "string" ? m.subtype : "";
-                    const txt = typeof m.result === "string" ? m.result : "";
-                    errorDetail = [subtype, txt].filter(Boolean).join(": ") || "agent run error";
-                  }
-                }
-                yield m;
+                await new Promise<void>((resolve) => (resolveStream = resolve));
               }
             } finally {
-              sessionId = sid; // persist for the next turn's resume
-              finished = true;
-              resolveWait();
+              // A caller that stops reading must not orphan the eager pump.
+              if (!completed) {
+                try {
+                  await run.cancel?.();
+                } catch {
+                  // Stream cleanup is best-effort; preserve the caller's error.
+                }
+              }
             }
           },
+          cancel() {
+            if (!cancelPromise) {
+              cancelPromise = (async () => {
+                if (completed || queryClosed) return;
+                if (typeof q.interrupt === "function") {
+                  void Promise.resolve()
+                    .then(() => q.interrupt!())
+                    .catch(() => {
+                      try {
+                        closeQuery();
+                      } catch {
+                        // The bounded fallback below gets one more close attempt.
+                      }
+                    });
+
+                  // Give a cooperative interrupt time to finish the iterator,
+                  // but never let /stop or shutdown wait on it indefinitely.
+                  let timer: ReturnType<typeof setTimeout> | undefined;
+                  await Promise.race([
+                    pumpPromise.then(
+                      () => undefined,
+                      () => undefined
+                    ),
+                    new Promise<void>((resolve) => {
+                      timer = setTimeout(resolve, Math.max(0, cancelGraceMs));
+                    }),
+                  ]);
+                  if (timer) clearTimeout(timer);
+                  if (!completed) closeQuery();
+                  return;
+                }
+                closeQuery();
+              })();
+            }
+            return cancelPromise;
+          },
           async wait() {
-            if (!finished) await waitP;
+            await pumpPromise;
             // `error` is read by pickRunErrorDetail() so chat surfaces a useful detail.
-            const out: { status: string; id?: string; error?: string } = { status, id: sid };
+            const out: { status: string; id?: string; error?: string } = { status, id: runId };
             if (errorDetail) out.error = errorDetail;
             return out;
           },
         };
         return run;
+      },
+      close() {
+        if (!agentClosePromise) {
+          agentClosed = true;
+          const queries = [...activeQueries];
+          agentClosePromise = (async () => {
+            for (const query of queries) {
+              try {
+                query.close();
+              } catch {
+                // Continue closing the remaining active queries.
+              }
+            }
+            await Promise.allSettled(queries.map((query) => query.done));
+          })();
+        }
+        return agentClosePromise;
       },
     };
     return agent;
@@ -413,13 +593,21 @@ export function createClaudeAgentSdk(opts?: {
 
   return {
     async prompt(message, sdkOpts): Promise<SdkPromptResult> {
-      const q = await startQuery(message, {
+      const mcpServers = toAgentMcpServers(sdkOpts.mcpServers);
+      const q = await runQuery(message, {
         model: sdkOpts.model.id,
         cwd: sdkOpts.local.cwd,
         env: engineAuthEnv(authMode, sdkOpts.apiKey ?? ""),
-        ...permissionOptions(denyDestructive, sanitizeInput, allowWriteRoots),
+        ...permissionOptions(
+          denyDestructive,
+          sanitizeInput,
+          allowWriteRoots,
+          sdkOpts.local.cwd,
+          Boolean(mcpServers?.["csagent-ask"])
+        ),
         ...(effort ? { effort } : {}),
-        ...(toAgentMcpServers(sdkOpts.mcpServers) ? { mcpServers: toAgentMcpServers(sdkOpts.mcpServers) } : {}),
+        settingSources: [...IRIDA_SETTING_SOURCES],
+        ...(mcpServers ? { mcpServers } : {}),
         ...(sdkOpts.disallowedTools?.length ? { disallowedTools: sdkOpts.disallowedTools } : {}),
       });
       return collectOneShot(q);

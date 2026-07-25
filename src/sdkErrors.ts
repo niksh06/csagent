@@ -147,6 +147,23 @@ export function isAuthErrorText(text: string | null | undefined): boolean {
 }
 
 /**
+ * Context-window overflow — the session grew past what the model accepts.
+ *
+ * Distinct from overload (capacity, retry fixes it) and auth (credential, rotation
+ * fixes it): nothing about the upstream is wrong, the CONVERSATION is too big. The
+ * only cures are shedding history (`/compact`) or starting over. Classified
+ * separately so the wedge can be handled with handoff+compact instead of falling
+ * into the generic rotatable-error path, which silently swaps in a fresh agent and
+ * replays only the last 4 turns — an unannounced amnesia for a long chat session.
+ */
+export function isContextOverflowErrorText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /prompt is too long|input length and .{0,40}exceed context limit|context (window|length) (limit )?exceeded|exceeds the (maximum )?context/i.test(
+    text
+  );
+}
+
+/**
  * Bounded backoff for transient `overload` (529/429/503) retries (I-133): 5s, 15s.
  * Capacity errors are not fixed by rotating the session (I-127) — they just need
  * the upstream a moment to recover, so sendTurn retries the SAME turn in place.

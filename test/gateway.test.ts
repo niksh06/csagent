@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   loadGatewayConfig,
   isChatAllowed,
@@ -48,7 +48,7 @@ async function withKey<T>(value: string | undefined, fn: () => Promise<T>): Prom
   return withEnv({ CURSOR_API_KEY: value }, fn);
 }
 
-function chatAgent(disposed: { v: boolean }, agentId = "agent_gw"): AgentLike {
+function chatAgent(disposed: { v: boolean; calls?: number }, agentId = "agent_gw"): AgentLike {
   return {
     agentId,
     send: async (m: string): Promise<RunLike> => ({
@@ -59,11 +59,12 @@ function chatAgent(disposed: { v: boolean }, agentId = "agent_gw"): AgentLike {
     }),
     [Symbol.asyncDispose]: async () => {
       disposed.v = true;
+      if (disposed.calls !== undefined) disposed.calls++;
     },
   };
 }
 
-function mockSdk(disposed: { v: boolean }): SdkLike & SdkCreateLike & SdkResumeLike {
+function mockSdk(disposed: { v: boolean; calls?: number }): SdkLike & SdkCreateLike & SdkResumeLike {
   return {
     prompt: async () => ({ status: "finished", result: "noop", id: "r", agentId: "a" }),
     create: async () => chatAgent(disposed),
@@ -132,6 +133,259 @@ test("GatewaySessionRouter maps peer to stable sess_", async () => {
     await router.closeAll();
     assert.equal(disposed.v, true);
   });
+});
+
+test("GatewaySessionRouter disposes a newly opened session when peer persistence fails", async () => {
+  await withKey("k", async () => {
+    const dir = tmp();
+    const disposed = { v: false, calls: 0 };
+    const router = new GatewaySessionRouter({ dir, adapter: "webhook", sdk: mockSdk(disposed) });
+    mkdirSync(join(dir, ".agent", "gateway.peers.json"), { recursive: true });
+
+    await assert.rejects(router.getOrCreateSession("u1"));
+    assert.equal(disposed.calls, 1);
+    await router.closeAll();
+    assert.equal(disposed.v, true);
+    assert.equal(disposed.calls, 1);
+  });
+});
+
+test("GatewaySessionRouter closeAll drains a session open already in progress", async () => {
+  await withKey("k", async () => {
+    const dir = tmp();
+    const disposed = { v: false };
+    let markCreateStarted!: () => void;
+    const createStarted = new Promise<void>((resolveStarted) => {
+      markCreateStarted = resolveStarted;
+    });
+    let releaseCreate!: () => void;
+    const createGate = new Promise<void>((resolveCreate) => {
+      releaseCreate = resolveCreate;
+    });
+    const sdk: SdkLike & SdkCreateLike & SdkResumeLike = {
+      prompt: async () => ({ status: "finished", result: "noop", id: "r", agentId: "a" }),
+      create: async () => {
+        markCreateStarted();
+        await createGate;
+        return chatAgent(disposed);
+      },
+      resume: async (id: string) => chatAgent(disposed, id),
+    };
+    const router = new GatewaySessionRouter({ dir, adapter: "webhook", sdk });
+
+    const opening = router.getOrCreateSession("u1");
+    await createStarted;
+    const closing = router.closeAll();
+    releaseCreate();
+    try {
+      const [openResult, closeResult] = await Promise.allSettled([opening, closing]);
+      assert.equal(openResult.status, "rejected");
+      assert.equal(closeResult.status, "fulfilled");
+      assert.equal(disposed.v, true);
+    } finally {
+      await router.closeAll();
+    }
+  });
+});
+
+test("GatewaySessionRouter closeAll waits for every close before reporting a failure", async () => {
+  const router = new GatewaySessionRouter({ dir: tmp(), adapter: "webhook" });
+  let markSlowStarted!: () => void;
+  const slowStarted = new Promise<void>((resolveStarted) => {
+    markSlowStarted = resolveStarted;
+  });
+  let releaseSlow!: () => void;
+  const slowGate = new Promise<void>((resolveSlow) => {
+    releaseSlow = resolveSlow;
+  });
+  let slowFinished = false;
+  const active = (
+    router as unknown as { active: Map<string, { close(): Promise<void> }> }
+  ).active;
+  active.set("failed", {
+    close: async () => {
+      throw new Error("first close failed");
+    },
+  });
+  active.set("slow", {
+    close: async () => {
+      markSlowStarted();
+      await slowGate;
+      slowFinished = true;
+    },
+  });
+
+  const closing = router.closeAll();
+  let closingSettled = false;
+  void closing.then(
+    () => {
+      closingSettled = true;
+    },
+    () => {
+      closingSettled = true;
+    }
+  );
+  await slowStarted;
+  await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+  try {
+    assert.equal(closingSettled, false);
+  } finally {
+    releaseSlow();
+  }
+  await assert.rejects(closing, /first close failed/);
+  assert.equal(slowFinished, true);
+});
+
+test("GatewaySessionRouter closeAll starts active cancellation before a hung open drains", async () => {
+  const router = new GatewaySessionRouter({ dir: tmp(), adapter: "webhook" });
+  let markActiveCloseStarted!: () => void;
+  const activeCloseStarted = new Promise<void>((resolveStarted) => {
+    markActiveCloseStarted = resolveStarted;
+  });
+  let releaseOpening!: () => void;
+  const openingGate = new Promise<void>((resolveOpening) => {
+    releaseOpening = resolveOpening;
+  });
+  const internals = router as unknown as {
+    active: Map<string, { close(): Promise<void> }>;
+    opening: Map<string, Promise<unknown>>;
+  };
+  internals.active.set("active-peer", {
+    close: async () => markActiveCloseStarted(),
+  });
+  internals.opening.set("opening-peer", openingGate);
+
+  const closing = router.closeAll();
+  try {
+    const startedPromptly = await Promise.race([
+      activeCloseStarted.then(() => true),
+      new Promise<boolean>((resolveImmediate) => setImmediate(() => resolveImmediate(false))),
+    ]);
+    assert.equal(startedPromptly, true);
+  } finally {
+    releaseOpening();
+    await closing;
+  }
+});
+
+test("GatewaySessionRouter closeAll bounds a hung open and closes its late session", async () => {
+  await withKey("k", async () => {
+    const dir = tmp();
+    const disposed = { v: false, calls: 0 };
+    let markCreateStarted!: () => void;
+    const createStarted = new Promise<void>((resolveStarted) => {
+      markCreateStarted = resolveStarted;
+    });
+    let releaseCreate!: () => void;
+    const createGate = new Promise<void>((resolveCreate) => {
+      releaseCreate = resolveCreate;
+    });
+    const sdk: SdkLike & SdkCreateLike & SdkResumeLike = {
+      prompt: async () => ({ status: "finished", result: "noop", id: "r", agentId: "a" }),
+      create: async () => {
+        markCreateStarted();
+        await createGate;
+        return chatAgent(disposed);
+      },
+      resume: async (id: string) => chatAgent(disposed, id),
+    };
+    const router = new GatewaySessionRouter({
+      dir,
+      adapter: "webhook",
+      sdk,
+      openingCloseGraceMs: 0,
+    });
+    const opening = router.getOrCreateSession("opening-peer");
+    await createStarted;
+    let activeClosed = false;
+    const active = (
+      router as unknown as { active: Map<string, { close(): Promise<void> }> }
+    ).active;
+    active.set("active-peer", {
+      close: async () => {
+        activeClosed = true;
+      },
+    });
+
+    await router.closeAll();
+    assert.equal(activeClosed, true);
+    assert.equal(disposed.v, false);
+
+    const lateOpening = assert.rejects(opening, /gateway router is closing/);
+    releaseCreate();
+    await lateOpening;
+    assert.equal(disposed.v, true);
+    assert.equal(disposed.calls, 1);
+  });
+});
+
+test("GatewaySessionRouter latches cancellation while a peer session is opening", async () => {
+  await withKey("k", async () => {
+    const dir = tmp();
+    let markCreateStarted!: () => void;
+    const createStarted = new Promise<void>((resolveStarted) => {
+      markCreateStarted = resolveStarted;
+    });
+    let releaseCreate!: () => void;
+    const createGate = new Promise<void>((resolveCreate) => {
+      releaseCreate = resolveCreate;
+    });
+    let sendCalls = 0;
+    const sdk: SdkLike & SdkCreateLike & SdkResumeLike = {
+      prompt: async () => ({ status: "finished", result: "noop", id: "r", agentId: "a" }),
+      create: async () => {
+        markCreateStarted();
+        await createGate;
+        return {
+          agentId: "agent-open-cancel",
+          send: async () => {
+            sendCalls++;
+            return {
+              stream: async function* () {
+                yield { type: "text", text: "must not run" };
+              },
+              wait: async () => ({ status: "finished", id: "run-unexpected" }),
+            };
+          },
+        };
+      },
+      resume: async (id: string) => chatAgent({ v: false }, id),
+    };
+    const router = new GatewaySessionRouter({ dir, adapter: "webhook", sdk });
+
+    const inbound = router.handleInbound("u1", "hello");
+    await createStarted;
+    try {
+      assert.equal(await router.cancelActive("u1"), true);
+      releaseCreate();
+      await assert.rejects(inbound, /turn cancelled/);
+      assert.equal(sendCalls, 0);
+    } finally {
+      releaseCreate();
+      await router.closeAll();
+    }
+  });
+});
+
+test("GatewaySessionRouter cancelActive only delegates to an already-active session", async () => {
+  const router = new GatewaySessionRouter({ dir: tmp(), adapter: "webhook" });
+  let cancelCalls = 0;
+  const active = (
+    router as unknown as {
+      active: Map<string, { cancelActiveTurn(): Promise<boolean> }>;
+    }
+  ).active;
+  active.set(peerKey("webhook", "u1"), {
+    cancelActiveTurn: async () => {
+      cancelCalls++;
+      return true;
+    },
+  });
+
+  assert.equal(await router.cancelActive("missing"), false);
+  assert.equal(cancelCalls, 0);
+  assert.equal(await router.cancelActive("u1"), true);
+  assert.equal(cancelCalls, 1);
 });
 
 test("GatewaySessionRouter maps digest follow-up to expanded prompt", async () => {
@@ -318,6 +572,53 @@ test("startGateway binds port and closes cleanly", async () => {
       assert.match(body.reply, /via fetch/);
       await handle.close();
       assert.equal(disposed.v, true);
+    });
+  });
+});
+
+test("startGateway close stops ingress concurrently with sessions and is idempotent", async () => {
+  await withKey("k", async () => {
+    await withEnv({ GATEWAY_WEBHOOK_SECRET: "test-secret" }, async () => {
+      const dir = tmp();
+      writeExampleGatewayConfig(dir, { port: 0 });
+      const handle = await startGateway({ dir, port: 0, sdk: mockSdk({ v: false }) });
+      const webhook = handle.webhook!;
+      const realWebhookClose = webhook.close.bind(webhook);
+      const realRouterClose = handle.router.closeAll.bind(handle.router);
+      let webhookCloseCalls = 0;
+      let routerCloseCalls = 0;
+      let markWebhookCloseStarted!: () => void;
+      const webhookCloseStarted = new Promise<void>((resolveStarted) => {
+        markWebhookCloseStarted = resolveStarted;
+      });
+      let releaseWebhookClose!: () => void;
+      const webhookCloseGate = new Promise<void>((resolveClose) => {
+        releaseWebhookClose = resolveClose;
+      });
+      webhook.close = async () => {
+        webhookCloseCalls++;
+        markWebhookCloseStarted();
+        await webhookCloseGate;
+        await realWebhookClose();
+      };
+      handle.router.closeAll = () => {
+        routerCloseCalls++;
+        return realRouterClose();
+      };
+
+      const closing = [handle.close(), handle.close()];
+      await webhookCloseStarted;
+      await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+      try {
+        assert.equal(routerCloseCalls, 1, "session close must start before ingress drain completes");
+      } finally {
+        releaseWebhookClose();
+        await Promise.allSettled(closing);
+        await realWebhookClose().catch(() => {});
+        await realRouterClose().catch(() => {});
+      }
+      assert.equal(webhookCloseCalls, 1);
+      assert.equal(routerCloseCalls, 1);
     });
   });
 });

@@ -29,7 +29,7 @@ export interface AgentLoggerOptions {
   /** Prefix tag, e.g. `chat`, `tui`. */
   component?: string;
   /** Extra sink (tests, gateway). Receives redacted line + level. */
-  onLog?: (line: string, level?: ServiceLogLevel) => void;
+  onLog?: (line: string, level?: ServiceLogLevel) => void | Promise<void>;
   /** Append to this file instead of stdout/stderr (TUI must not write to stdout). */
   logFile?: string;
 }
@@ -61,6 +61,11 @@ export function resolveAgentLogger(opts: AgentLoggerOptions = {}): (line: string
         emitServiceLog(stamped, level);
       }
     }
-    opts.onLog?.(msg, level);
+    try {
+      const pending = opts.onLog?.(msg, level);
+      if (pending) void pending.catch(() => {});
+    } catch {
+      /* diagnostics must never crash the app */
+    }
   };
 }
