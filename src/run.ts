@@ -166,6 +166,8 @@ export async function runPrompt(prompt: string, opts: RunOptions = {}): Promise<
         cfg,
         rawMessage: prompt,
         includeProfile: true,
+        // A one-shot run IS the first (and only) turn of its session.
+        isFirstTurn: true,
       });
       const sessionMemoryBlocks = await sessionStartMemoryBlocks(dir, cfg);
       const autoRagBlocks = await autoRagMemoryBlocks(dir, taskText, cfg);

@@ -60,6 +60,7 @@ import {
 } from "./sdkErrors.js";
 import { createMemoryStore } from "./memoryStore.js";
 import { writeSessionHandoff } from "./sessionHandoff.js";
+import { cogitBriefBlocks } from "./cogitBrief.js";
 import {
   API_KEY_HELP,
   ANTHROPIC_API_KEY_HELP,
@@ -434,6 +435,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
               cfg,
               rawMessage: msg,
               includeProfile: isFirstTurn,
+              isFirstTurn,
               channel: sessionChannel,
             })
         );
@@ -882,9 +884,17 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
         }
 
         log(`[chat] compact ok — retrying original turn on the same agent`);
+        // A compact is the other moment the agent "wakes up": history just got
+        // summarized away, so re-brief it exactly as on a first turn.
+        const briefBlocks = await soft("cogit brief (post-compact)", [] as string[], () =>
+          cogitBriefBlocks(cfg)
+        );
+        if (briefBlocks.length) log(`[chat] post-compact cogit brief chars=${briefBlocks.join("").length}`);
         // Retry the plain composed message: the pre-compact prompt may have carried
         // a replay prefix that the compacted session no longer needs.
-        attemptSendMsg = coreSendMsg;
+        attemptSendMsg = briefBlocks.length
+          ? `${briefBlocks.join("\n\n")}\n\n${coreSendMsg}`
+          : coreSendMsg;
         onTurnRetry?.(reason);
         opts.onSessionCompacted?.({ sessionId, reason, handoffNote });
         return true;

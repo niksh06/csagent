@@ -88,6 +88,8 @@ export interface MemoryConfig {
   autoRag?: AutoRagConfig;
   /** Mode prefix + profile excerpt before each turn (I-52). */
   preTurn?: PreTurnConfig;
+  /** Cogit belief-state slice injected on the first turn (and after a compact). */
+  cogitBrief?: CogitBriefConfig;
   /** Wings omitted from FTS/semantic search unless includeArchive/includeEpisodic (default: cursor-ide, secure, episodic). */
   searchExcludeWings?: string[];
   /** Wings skipped by embed-on-save and reindex-embeddings (default: cursor-ide, secure). */
@@ -96,6 +98,30 @@ export interface MemoryConfig {
   search?: MemorySearchConfig;
   /** Annotate recalled notes older than this many days with a re-verify caution (I-115; default 7, 0 disables). */
   stalenessDays?: number;
+}
+
+/**
+ * Cogit belief-state brief (see src/cogitBrief.ts). Read-only shell-out to the
+ * cogit CLI on the first turn of a session; disabled unless `projects` is set.
+ */
+export interface CogitBriefConfig {
+  enabled?: boolean;
+  /** Project qualifiers to brief on, in order. */
+  projects?: string[];
+  /** Max facts per project (default 8, capped at 50). */
+  limit?: number;
+  /** Total chars cap for the rendered block (default 2500). */
+  maxChars?: number;
+  /** cogit repository path (`--repo`). */
+  repo?: string;
+  /** Interpreter/binary (default `python3`). */
+  command?: string;
+  /** Args before the subcommand (default `["-m", "cogit"]`). */
+  args?: string[];
+  /** Working directory for the CLI (needed when invoking `-m cogit`). */
+  cwd?: string;
+  /** Per-project CLI timeout in ms (default 4000). */
+  timeoutMs?: number;
 }
 
 /** Stealth browser MCP (puppeteer-extra + persistent Chromium profile). */
@@ -373,6 +399,18 @@ const preTurnSchema = z.object({
   modeEnv: nonEmptyString.optional(),
 });
 
+const cogitBriefSchema = z.object({
+  enabled: z.boolean().optional(),
+  projects: trimmedStringArray.optional(),
+  limit: z.number().min(1).optional(),
+  maxChars: z.number().min(256).optional(),
+  repo: z.string().optional(),
+  command: z.string().optional(),
+  args: trimmedStringArray.optional(),
+  cwd: z.string().optional(),
+  timeoutMs: z.number().min(100).optional(),
+});
+
 const memorySchema = z.object({
   onStart: trimmedStringArray.optional(),
   maxCharsPerTurn: z.number().min(256).optional(),
@@ -381,6 +419,7 @@ const memorySchema = z.object({
   autoRag: autoRagSchema.optional(),
   search: memorySearchSchema.optional(),
   preTurn: preTurnSchema.optional(),
+  cogitBrief: cogitBriefSchema.optional(),
   searchExcludeWings: trimmedStringArray.optional(),
   embedExcludeWings: trimmedStringArray.optional(),
   stalenessDays: z.number().min(0).optional(),
