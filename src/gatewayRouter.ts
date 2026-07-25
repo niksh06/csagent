@@ -47,6 +47,10 @@ export interface GatewayRouterOptions {
 
 const OPENING_CLOSE_GRACE_MS = 1_000;
 
+/** Shown once, on the reply of the turn during which the context was compacted. */
+const COMPACT_NOTICE =
+  "🧠 _Контекст переполнился — сжал историю и записал handoff. Детали прошлых ходов теперь в пересказе, не дословно._";
+
 export class GatewaySessionRouter {
   private readonly dir: string;
   private readonly adapter: string;
@@ -54,6 +58,8 @@ export class GatewaySessionRouter {
   private readonly yesIUnderstand: boolean;
   private readonly sdk?: SdkCreateLike & SdkResumeLike;
   private readonly onLog: (line: string) => void;
+  /** Pending "I just compacted" notices, keyed by peer; consumed by the next reply. */
+  private readonly compactNotice = new Map<string, string>();
   private readonly openingCloseGraceMs: number;
   private peers: GatewayPeersFile;
   private active = new Map<string, ChatSession>();
@@ -136,6 +142,12 @@ export class GatewaySessionRouter {
       gatewayPeer: { adapter: this.adapter, chatId },
       engine: chatEngine,
       onLog: this.onLog,
+      onSessionCompacted: (info) => {
+        this.onLog(
+          `[gateway] session compacted chat=${chatId} reason=${info.reason} handoff=${info.handoffNote ?? "-"}`
+        );
+        this.compactNotice.set(key, COMPACT_NOTICE);
+      },
     });
     if (!opened.ok) {
       throw new GatewayRouterError(opened.message);
@@ -221,7 +233,14 @@ export class GatewaySessionRouter {
       }
       if (wasCancelled()) throw new GatewayRouterError("turn cancelled");
       const out = await session.sendTurn(turnText, hooks);
-      if (out.kind === "ok") return { reply: out.assistantText };
+      // Say it out loud: the session just shed history mid-turn. Letting that
+      // happen silently is exactly the complaint this whole line of work started
+      // from — the user could not tell a forgetful companion from a reset one.
+      const notice = this.compactNotice.get(key);
+      this.compactNotice.delete(key);
+      if (out.kind === "ok") {
+        return { reply: notice ? `${notice}\n\n${out.assistantText}` : out.assistantText };
+      }
       if (out.kind === "blocked") throw new GatewayRouterError(out.reason, "blocked");
       const partial = out.partialAssistantText?.trim();
       throw new GatewayRouterError(partial ? `${out.message}\n\n${partial}` : out.message);

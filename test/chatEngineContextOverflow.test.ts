@@ -287,3 +287,39 @@ test("overload errors still retry in place rather than compacting", async () => 
     await opened.session.close();
   });
 });
+
+test("the gateway tells the user its context was compacted", async () => {
+  // The whole point: a companion that silently forgets is indistinguishable from
+  // a broken one. The notice rides the reply of the turn it happened on.
+  const { GatewaySessionRouter } = await import("../src/gatewayRouter.js");
+  await withKey(async () => {
+    const dir = tmp("gw-compact-");
+    const sent: string[] = [];
+    let created = 0;
+    const sdk = {
+      create: async () => {
+        created++;
+        return {
+          agentId: `agent-${created}`,
+          send: async (message: string) => {
+            sent.push(message);
+            if (sent.length === 1) throw new Error(OVERFLOW);
+            return okRun("после сжатия");
+          },
+        } as AgentLike;
+      },
+    } as unknown as ConstructorParameters<typeof GatewaySessionRouter>[0]["sdk"];
+
+    const router = new GatewaySessionRouter({ dir, adapter: "webhook", sdk, onLog: () => {} });
+    try {
+      const out = await router.handleInbound("u1", "привет");
+      assert.match(out.reply, /Контекст переполнился/, "the user must be told");
+      assert.match(out.reply, /после сжатия/, "the actual answer still comes through");
+
+      const again = await router.handleInbound("u1", "ещё");
+      assert.ok(!again.reply.includes("Контекст переполнился"), "notice fires once, not on every later turn");
+    } finally {
+      await router.closeAll();
+    }
+  });
+});
