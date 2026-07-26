@@ -1,7 +1,7 @@
 /**
  * Optional cron completion notifications (webhook or direct Telegram).
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { resolveTelegramBotToken } from "./credentials.js";
@@ -191,8 +191,17 @@ export function saveCronAttachment(
     const root = resolve(dir, cfg.stateDir);
     mkdirSync(root, { recursive: true });
     const safe = basename(attachment.filename).replace(/[^A-Za-z0-9._-]/g, "_");
-    const path = resolve(root, `cron.attach.${jobId}.${safe}`);
+    const prefix = `cron.attach.${jobId}.`;
+    const name = `${prefix}${safe}`;
+    const path = resolve(root, name);
     writeFileSync(path, attachment.content, { encoding: "utf8", mode: 0o600 });
+    // Keep exactly one copy per job: this is a crash buffer, not an archive,
+    // and the day slice is ~250 KB — a daily job would otherwise quietly grow
+    // the state dir by ~90 MB a year on a machine that already runs tight.
+    // Pruned only AFTER the new write lands, so a failed write keeps the old one.
+    for (const f of readdirSync(root)) {
+      if (f.startsWith(prefix) && f !== name) rmSync(resolve(root, f), { force: true });
+    }
     return path;
   } catch (e) {
     console.error(

@@ -152,6 +152,27 @@ test("notify still sends output text alongside the attachment when a job has bot
   assert.deepEqual(calls, ["sendRichMessage", "sendDocument"]);
 });
 
+test("only the latest attachment per job is kept on disk", async () => {
+  const dir = notifyDir();
+  const stale = resolve(dir, ".agent", `cron.attach.${JOB_ID}.tparser-day-2026-07-26.md`);
+  const other = resolve(dir, ".agent", "cron.attach.other-job.keep.md");
+  writeFileSync(stale, "вчерашний", "utf8");
+  writeFileSync(other, "чужой", "utf8");
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, result: {} }));
+  try {
+    await withTelegramToken(() => sendCronJobNotify(attachJob(), attachResult(), new Date(), dir));
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assert.ok(
+    !existsSync(stale),
+    "yesterday's 250 KB copy must not accumulate — this is a crash buffer, not an archive"
+  );
+  assert.ok(existsSync(other), "another job's buffer is not ours to delete");
+  assert.ok(existsSync(resolve(dir, ".agent", `cron.attach.${JOB_ID}.tparser-day-2026-07-27.md`)));
+});
+
 test("a failed upload parks a pointer to the on-disk file instead of losing it", async () => {
   const dir = notifyDir();
   const prevFetch = globalThis.fetch;
