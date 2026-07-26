@@ -4,7 +4,16 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+
+# torch from the CPU index FIRST (I-172). The default PyPI wheel for linux/arm64 is a
+# CUDA build — the image carried torch 2.13.0+cu130 plus 2.9 GB of nvidia-* libraries
+# while `torch.cuda.is_available()` returned False, because this host is an arm64 Mac
+# and never had a GPU to offer. Installing the +cpu wheel up front means the
+# requirements install below finds torch already satisfied and never reaches for the
+# CUDA variant. Keep the pin in step with sentence-transformers' supported range.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 \
+ && pip install --no-cache-dir -r requirements.txt \
+ && python -c "import torch,sys; print('torch', torch.__version__); sys.exit(0 if '+cpu' in torch.__version__ else 1)"
 
 COPY app.py ./
 

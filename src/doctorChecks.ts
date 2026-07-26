@@ -55,6 +55,15 @@ import {
 import { loadRunMetrics } from "./runMetrics.js";
 import { gatherStaleDistChecks } from "./doctorDistStale.js";
 import { createMemoryStore } from "./memoryStore.js";
+import {
+  embeddingsEnabled,
+  EMBEDDINGS_DEFAULT_MODEL,
+  EMBEDDINGS_DEFAULT_URL,
+  EMBEDDINGS_DIM,
+} from "./embeddings.js";
+
+/** Probe budget for the embedding round-trip — a hung service must not hang doctor. */
+const DOCTOR_EMBED_TIMEOUT_MS = 5_000;
 
 export interface DoctorCheck {
   name: string;
@@ -632,4 +641,75 @@ export async function gatherDoctorTelegramChecks(dir: string = process.cwd()): P
       fix: TELEGRAM_ALLOWED_UPDATES_FIX,
     },
   ];
+}
+
+/**
+ * Embedding service reachability (I-172).
+ *
+ * `makeEmbedder` fails soft by design — a dead service returns `null` and the turn
+ * carries on without memory. That is right for a chat turn and wrong for diagnosis:
+ * on 2026-07-26 the embedder was down for hours and nothing said so, because the one
+ * place that would have noticed swallows the reason on purpose.
+ *
+ * This probe does a real round-trip rather than a liveness ping. A `/healthz` 200
+ * only proves the process is up; an embedder serving a DIFFERENT model answers 200
+ * with a vector of the wrong width, which silently poisons a corpus whose stored
+ * vectors were built at 768 dims — a failure that liveness can never catch.
+ */
+export async function gatherDoctorEmbedderChecks(
+  dir: string = process.cwd(),
+  fetchFn: typeof fetch = fetch
+): Promise<DoctorCheck[]> {
+  let embCfg;
+  try {
+    embCfg = loadConfig(dir).memory?.embeddings;
+  } catch {
+    return [];
+  }
+  if (!embeddingsEnabled(embCfg)) {
+    return [{ name: "embeddings", ok: true, detail: "disabled (memory.embeddings.enabled != true)" }];
+  }
+
+  const url = (embCfg?.url ?? EMBEDDINGS_DEFAULT_URL).replace(/\/$/, "");
+  const provider = embCfg?.provider ?? "ollama";
+  const endpoint = provider === "embed-service" ? `${url}/embed` : `${url}/api/embeddings`;
+  const payload =
+    provider === "embed-service"
+      ? { text: "doctor probe" }
+      : { model: embCfg?.model ?? EMBEDDINGS_DEFAULT_MODEL, prompt: "doctor probe" };
+  const fix =
+    provider === "embed-service"
+      ? "docker compose -f deploy/docker-compose.irida.yml up -d embedder  # then: docker logs irida-embedder"
+      : `check the embeddings service at ${url}`;
+
+  try {
+    const res = await fetchFn(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(DOCTOR_EMBED_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      return [{ name: "embeddings", ok: false, detail: `${provider} ${url} → HTTP ${res.status}`, fix }];
+    }
+    const body = (await res.json()) as { embedding?: unknown; vector?: unknown };
+    const vec = provider === "embed-service" ? body.vector : body.embedding;
+    if (!Array.isArray(vec) || vec.length === 0) {
+      return [{ name: "embeddings", ok: false, detail: `${provider} ${url} → no vector in response`, fix }];
+    }
+    if (vec.length !== EMBEDDINGS_DIM) {
+      return [
+        {
+          name: "embeddings",
+          ok: false,
+          detail: `${provider} ${url} → ${vec.length}-dim, expected ${EMBEDDINGS_DIM} — stored vectors were built with a different model`,
+          fix: "align memory.embeddings.model with the deployed service, then reindex",
+        },
+      ];
+    }
+    return [{ name: "embeddings", ok: true, detail: `${provider} ${url} → ${vec.length}-dim ok` }];
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    return [{ name: "embeddings", ok: false, detail: `${provider} ${url} unreachable — ${why}`, fix }];
+  }
 }

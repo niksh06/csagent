@@ -323,3 +323,46 @@ test("the gateway tells the user its context was compacted", async () => {
     }
   });
 });
+
+test("degradedNoticeText names the layer, not just 'something broke'", async () => {
+  const { degradedNoticeText } = await import("../src/gatewayRouter.js");
+  // Knowing WHICH layer is missing is the difference between "он тупит" and
+  // "у него сейчас нет памяти" — the user can act on the second.
+  assert.match(degradedNoticeText("autoRag memory"), /автопамять/);
+  assert.match(degradedNoticeText("session-start memory"), /стартовая память/);
+  assert.match(degradedNoticeText("preTurn blocks"), /профиль/);
+  assert.match(degradedNoticeText("cogit brief (post-compact)"), /журнал убеждений/);
+  // Unknown labels pass through rather than being flattened to a vague message.
+  assert.match(degradedNoticeText("something-new"), /something-new/);
+});
+
+test("a failing store raises onStoreDegraded without failing the turn", async () => {
+  const { createStore } = await import("../src/store.js");
+  await withKey(async () => {
+    const dir = tmp("degraded-");
+    const real = createStore(dir, ".agent");
+    const broken = Object.create(real) as ReturnType<typeof createStore>;
+    (broken as unknown as Record<string, unknown>).recordRun = async () => {
+      throw new Error("connect ECONNREFUSED (simulated store outage)");
+    };
+
+    const degraded: string[] = [];
+    const opened = await openChatSession({
+      sdk: {
+        create: async () => ({ agentId: "a1", send: async () => okRun("ответ") }) as AgentLike,
+      } as unknown as Parameters<typeof openChatSession>[0]["sdk"],
+      dir,
+      interactive: false,
+      store: broken,
+      onStoreDegraded: (label) => degraded.push(label),
+    });
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+
+    const out = await opened.session.sendTurn("привет");
+    assert.equal(out.kind, "ok", "a store outage must degrade the turn, not fail it (I-137)");
+    assert.ok(degraded.length > 0, "and it must be announced, not swallowed");
+    assert.ok(degraded.some((l) => l.includes("recordRun")));
+    await opened.session.close();
+  });
+});

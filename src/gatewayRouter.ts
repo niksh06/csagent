@@ -51,6 +51,21 @@ const OPENING_CLOSE_GRACE_MS = 1_000;
 const COMPACT_NOTICE =
   "🧠 _Контекст переполнился — сжал историю и записал handoff. Детали прошлых ходов теперь в пересказе, не дословно._";
 
+/**
+ * Names the degraded layer rather than saying "something broke": "автопамять" and
+ * "профиль" fail in ways the user can actually judge, and knowing WHICH one is
+ * missing is the difference between "он тупит" and "у него нет памяти прямо сейчас".
+ */
+export function degradedNoticeText(label: string): string {
+  const what =
+    label.includes("autoRag") ? "автопамять (семантический поиск)"
+    : label.includes("session-start memory") ? "стартовая память сессии"
+    : label.includes("preTurn") ? "профиль и режим"
+    : label.includes("cogit") ? "журнал убеждений"
+    : label;
+  return `⚠️ _Отвечал без части памяти: ${what} сейчас недоступна._`;
+}
+
 export class GatewaySessionRouter {
   private readonly dir: string;
   private readonly adapter: string;
@@ -60,6 +75,8 @@ export class GatewaySessionRouter {
   private readonly onLog: (line: string) => void;
   /** Pending "I just compacted" notices, keyed by peer; consumed by the next reply. */
   private readonly compactNotice = new Map<string, string>();
+  /** Pending "a store degraded during this turn" notices, keyed by peer. */
+  private readonly degradedNotice = new Map<string, string>();
   private readonly openingCloseGraceMs: number;
   private peers: GatewayPeersFile;
   private active = new Map<string, ChatSession>();
@@ -142,6 +159,21 @@ export class GatewaySessionRouter {
       gatewayPeer: { adapter: this.adapter, chatId },
       engine: chatEngine,
       onLog: this.onLog,
+      onStoreDegraded: (label) => {
+        // Store layers fail soft so a turn survives an outage (I-137) — which also
+        // means the outage is invisible. Degrading silently is fine; degrading
+        // *unannounced* is what makes a forgetful companion indistinguishable from a
+        // broken one.
+        //
+        // Scope, measured rather than assumed: this covers layers that THROW
+        // (memory store, preTurn, cogit brief). It does NOT cover a dead embedder —
+        // `searchNotesHybrid` falls back to FTS and returns normally
+        // (memoryStore.ts:533), so autoRag quietly serves worse results with no
+        // signal at all. Catching that needs the store to report "semantic
+        // unavailable"; tracked in I-172.
+        this.onLog(`[gateway] store degraded chat=${chatId} label=${label}`);
+        this.degradedNotice.set(key, label);
+      },
       onSessionCompacted: (info) => {
         this.onLog(
           `[gateway] session compacted chat=${chatId} reason=${info.reason} handoff=${info.handoffNote ?? "-"}`
@@ -236,10 +268,17 @@ export class GatewaySessionRouter {
       // Say it out loud: the session just shed history mid-turn. Letting that
       // happen silently is exactly the complaint this whole line of work started
       // from — the user could not tell a forgetful companion from a reset one.
-      const notice = this.compactNotice.get(key);
+      const notices: string[] = [];
+      const compacted = this.compactNotice.get(key);
+      if (compacted) notices.push(compacted);
+      const degraded = this.degradedNotice.get(key);
+      if (degraded) notices.push(degradedNoticeText(degraded));
       this.compactNotice.delete(key);
+      this.degradedNotice.delete(key);
       if (out.kind === "ok") {
-        return { reply: notice ? `${notice}\n\n${out.assistantText}` : out.assistantText };
+        return {
+          reply: notices.length ? `${notices.join("\n")}\n\n${out.assistantText}` : out.assistantText,
+        };
       }
       if (out.kind === "blocked") throw new GatewayRouterError(out.reason, "blocked");
       const partial = out.partialAssistantText?.trim();

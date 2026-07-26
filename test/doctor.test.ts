@@ -175,3 +175,71 @@ test("gatherStaleDistChecks warns when dist is older than src", () => {
   assert.equal(stale[0]?.ok, false);
   assert.match(stale[0]?.detail ?? "", /memoryStore/);
 });
+
+// I-172: a dead embedder used to be invisible — makeEmbedder fails soft by design,
+// so nothing anywhere said the semantic layer was gone. doctor is where that has to
+// surface, and a liveness ping is not enough: a service running the WRONG model
+// answers 200 with a vector of the wrong width and silently poisons a 768-dim corpus.
+
+function embedderCfgDir(): string {
+  const dir = mkdtempSync(resolve(tmpdir(), "doctor-embed-"));
+  writeFileSync(
+    join(dir, "agent.config.json"),
+    JSON.stringify({
+      memory: {
+        embeddings: { enabled: true, provider: "embed-service", url: "http://127.0.0.1:8014" },
+      },
+    })
+  );
+  return dir;
+}
+
+function stubFetch(body: unknown, status = 200): typeof fetch {
+  return (async () =>
+    ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    })) as unknown as typeof fetch;
+}
+
+test("doctor: embeddings check passes on a correct round-trip", async () => {
+  const { gatherDoctorEmbedderChecks } = await import("../src/doctorChecks.js");
+  const checks = await gatherDoctorEmbedderChecks(
+    embedderCfgDir(),
+    stubFetch({ vector: new Array(768).fill(0.1) })
+  );
+  assert.equal(checks[0]?.ok, true);
+  assert.match(checks[0]?.detail ?? "", /768-dim/);
+});
+
+test("doctor: embeddings check fails loudly on a wrong-width vector", async () => {
+  const { gatherDoctorEmbedderChecks } = await import("../src/doctorChecks.js");
+  const checks = await gatherDoctorEmbedderChecks(
+    embedderCfgDir(),
+    stubFetch({ vector: new Array(384).fill(0.1) })
+  );
+  assert.equal(checks[0]?.ok, false);
+  assert.match(checks[0]?.detail ?? "", /384-dim, expected 768/);
+  assert.match(checks[0]?.detail ?? "", /different model/);
+});
+
+test("doctor: embeddings check fails when the service is unreachable", async () => {
+  const { gatherDoctorEmbedderChecks } = await import("../src/doctorChecks.js");
+  const dead = (async () => {
+    throw new Error("fetch failed");
+  }) as unknown as typeof fetch;
+  const checks = await gatherDoctorEmbedderChecks(embedderCfgDir(), dead);
+  assert.equal(checks[0]?.ok, false);
+  assert.match(checks[0]?.detail ?? "", /unreachable/);
+  assert.ok(checks[0]?.fix, "a failed check must carry a copy-paste remedy");
+});
+
+test("doctor: embeddings check stays quiet when embeddings are off", async () => {
+  const { gatherDoctorEmbedderChecks } = await import("../src/doctorChecks.js");
+  const dir = mkdtempSync(resolve(tmpdir(), "doctor-embed-off-"));
+  writeFileSync(join(dir, "agent.config.json"), JSON.stringify({ memory: {} }));
+  const checks = await gatherDoctorEmbedderChecks(dir, stubFetch({}));
+  assert.equal(checks[0]?.ok, true);
+  assert.match(checks[0]?.detail ?? "", /disabled/);
+});

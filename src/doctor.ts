@@ -8,6 +8,7 @@ import {
   gatherDoctorChecks,
   gatherDoctorApiChecks,
   gatherDoctorStoreChecks,
+  gatherDoctorEmbedderChecks,
   gatherDoctorTelegramChecks,
   doctorAllOk,
   type ModelsListFn,
@@ -24,6 +25,7 @@ export async function cmdDoctor(
   const checks = [
     ...gatherDoctorChecks(dir),
     ...(await gatherDoctorStoreChecks(dir)),
+    ...(await gatherDoctorEmbedderChecks(dir)),
     ...(await gatherDoctorTelegramChecks(dir)),
     ...(await gatherDoctorApiChecks(dir, opts)),
   ];
@@ -38,4 +40,4 @@ export async function cmdDoctor(
   return allOk ? 0 : 1;
 }
 
-export { gatherDoctorChecks, gatherDoctorApiChecks, gatherDoctorStoreChecks, gatherDoctorTelegramChecks, doctorAllOk };
+export { gatherDoctorChecks, gatherDoctorApiChecks, gatherDoctorStoreChecks, gatherDoctorEmbedderChecks, gatherDoctorTelegramChecks, doctorAllOk };
