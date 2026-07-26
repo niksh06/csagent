@@ -39,3 +39,24 @@ export const TPARSE_DAILY_TOPICS: TparserTopic[] = [
 export function topicTagHintLine(topic: TparserTopic): string {
   return topic.tagHints.join(", ");
 }
+
+/**
+ * TParser's own `category` field → topic id. The API classifies every post into
+ * one of seven categories server-side, so the deterministic day slice buckets
+ * by category instead of re-deriving buckets from `topic_tags` (1800+ distinct
+ * tags in a single day — keyword matching there is guesswork). Categories not
+ * listed here (`General News`, `General Tech`) are the off-topic remainder,
+ * kept visible rather than dropped.
+ */
+export const TPARSER_CATEGORY_TO_TOPIC: Record<string, string> = {
+  AI: "ai-ml",
+  "AI Security": "aisec-mlsec",
+  InfoSec: "infosec",
+  Programming: "programming",
+  DevSecOps: "devsecops-devops",
+};
+
+/** Compact label for the caption line ("AI / ML / LLM" → "AI"). */
+export function topicShortTitle(topic: TparserTopic): string {
+  return topic.title.split("/")[0]!.trim();
+}

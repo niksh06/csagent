@@ -31,6 +31,7 @@ export const CRON_BUILTIN_HANDLERS = [
   "memory-consolidate",
   "evolution-cycle",
   "memory-reindex",
+  "tparser-day-slice",
 ] as const;
 export type CronBuiltinHandler = (typeof CRON_BUILTIN_HANDLERS)[number];
 

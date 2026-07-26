@@ -37,6 +37,10 @@ import {
   saveSelfMonitorState,
 } from "./selfMonitor.js";
 import { executeMemoryAuditBuiltin } from "./memoryAudit.js";
+import {
+  buildTparserDaySlice,
+  TPARSER_DAY_SLICE_WINDOW_HOURS,
+} from "./tparserDaySlice.js";
 import { exportRecentSessions } from "./sessionExport.js";
 import { ingestRecentSessions } from "./sessionIngest.js";
 import { mineCursorTranscripts } from "./cursorTranscriptMine.js";
@@ -399,6 +403,42 @@ export async function executeCronJob(
         ok: false,
         exitCode: EXIT.software,
         message: `memory-consolidate failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
+  if (job.builtin === "tparser-day-slice") {
+    try {
+      const slice = await buildTparserDaySlice({
+        cwd: workDir,
+        windowHours: job.topicWindowHours ?? TPARSER_DAY_SLICE_WINDOW_HOURS,
+      });
+      const s = slice.data.stats;
+      // Zero posts in a 24h window is not an empty day — TParser ingests ~550.
+      // Report it as a failure so self-monitor and /status see it, instead of
+      // shipping a cheerful empty file.
+      if (s.posts === 0) {
+        return withDuration(started, {
+          ok: false,
+          exitCode: EXIT.software,
+          message: "tparser-day-slice: 0 posts in window — TParser ingest or API is down",
+        });
+      }
+      return withDuration(started, {
+        ok: true,
+        exitCode: EXIT.ok,
+        message: `tparser-day-slice: ${s.posts} post(s) (${s.onTopic} on-topic, ${s.offTopic} off-topic) from ${s.channels} channel(s), ${slice.markdown.length} chars`,
+        attachment: {
+          filename: slice.filename,
+          content: slice.markdown,
+          caption: slice.caption,
+          contentType: "text/markdown; charset=utf-8",
+        },
+      });
+    } catch (e) {
+      return withDuration(started, {
+        ok: false,
+        exitCode: EXIT.software,
+        message: `tparser-day-slice failed: ${e instanceof Error ? e.message : String(e)}`,
       });
     }
   }

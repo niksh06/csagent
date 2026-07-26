@@ -130,3 +130,15 @@ export function iridaBrowserInsecureTls(): string | undefined {
 export function iridaChromePath(): string | undefined {
   return dualEnv("CHROME_PATH");
 }
+
+// --- TParser (day-slice cron builtin) ---
+
+/** Base URL of the local TParser API (default http://127.0.0.1:8002). */
+export function iridaTparserUrl(): string | undefined {
+  return dualEnv("TPARSER_URL");
+}
+
+/** Override for TParser's API_AUTH_TOKEN; normally read from its own `.env`. */
+export function iridaTparserToken(): string | undefined {
+  return dualEnv("TPARSER_TOKEN");
+}

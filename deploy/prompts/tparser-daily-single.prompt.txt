@@ -109,7 +109,7 @@ from lines you keep, and never drop a topic's single Tier-1 block.
 ```
 📬 TParser · день · {WINDOW_END}
 Разобрано {total} постов · подробно {deep_n} · в индексе {index_n} · вне тем {offtopic_n}
-Охват: {coverage}% дня попало в сводку ({deep_n}+{index_n} из {total})
+Охват: {coverage}% дня в этой сводке ({deep_n}+{index_n} из {total}) · весь день — файлом рядом
 
 **TL;DR:** 2–3 предложения — главный итог дня.
 
@@ -143,7 +143,7 @@ from lines you keep, and never drop a topic's single Tier-1 block.
 …
 
 ---
-В чате: «топ-50», «только InfoSec», «только AI» для углубления.
+Полный срез дня — отдельным файлом рядом. В чате: «топ-50», «только InfoSec», «только AI».
 ```
 
 ## Rules
@@ -155,9 +155,10 @@ from lines you keep, and never drop a topic's single Tier-1 block.
   there deliberately: roughly a third of a day matches no bucket, and that should
   be visible rather than quietly dropped.
 - `{coverage}` = `round(100 * (deep_n + index_n) / total, 1)` — compute it, do not
-  estimate it. It is printed so the reader can see how much of the day never made
-  it in: this digest is a top-N selection, and saying so beats implying the day was
-  small. If it drops sharply while `{total}` is normal, something upstream broke.
+  estimate it. This digest is a curated top-N (~7% of a day); the complete day
+  ships beside it as a file, built deterministically by the `tparser-day-slice`
+  cron builtin. Printing the real number keeps the two honest about their jobs.
+  If it drops sharply while `{total}` is normal, something upstream broke.
 - If a topic has 0 posts: one line «нет релевантных постов» and no index section for it.
 - Do not invent posts. Do not re-fetch the API beyond the steps above.
 
