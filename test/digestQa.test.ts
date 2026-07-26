@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   DEFAULT_DIGEST_JOB_ID,
   DIGEST_TG_TARGET_CHARS,
+  DIGEST_QA_MAX_BODY_CHARS,
   digestNeverRan,
   evaluateDigestQa,
   formatDigestQaAlert,
@@ -187,28 +188,27 @@ test("evaluateDigestQa warns but passes when digest 3501-12000 chars", () => {
       },
     },
   });
-  // Sized off the constant, not a literal: this test used to hardcode 3500 and
-  // silently stopped exercising the warn when the target moved to 8000.
-  const pad = "x".repeat(Math.ceil(DIGEST_TG_TARGET_CHARS / 3));
-  const body = [
+  // Sized off BOTH constants, never a literal: this test hardcoded 3500, then
+  // 12000, and each time the numbers moved it silently stopped exercising the
+  // warn band it exists to cover. Aim at the midpoint between warn and fail.
+  const skeleton = [
     "📬 TParser · день",
     "**TL;DR:** краткий итог дня для Telegram.",
     "## AI / ML / LLM",
     "Вердикт агента: ok",
     "https://t.me/example/1",
-    pad,
     "## AISec / MLSec",
     "https://t.me/example/2",
-    pad,
     "## InfoSec / AppSec",
     "https://t.me/example/3",
-    pad,
     "## Programming / devtools",
     "https://t.me/example/4",
   ].join("\n");
+  const want = Math.floor((DIGEST_TG_TARGET_CHARS + DIGEST_QA_MAX_BODY_CHARS) / 2);
+  const body = `${skeleton}\n${"x".repeat(want - skeleton.length - 1)}`;
   assert.ok(
-    body.length > DIGEST_TG_TARGET_CHARS && body.length <= 12_000,
-    `body len=${body.length} must exceed the tg target ${DIGEST_TG_TARGET_CHARS}`
+    body.length > DIGEST_TG_TARGET_CHARS && body.length <= DIGEST_QA_MAX_BODY_CHARS,
+    `body len=${body.length} must sit between warn ${DIGEST_TG_TARGET_CHARS} and fail ${DIGEST_QA_MAX_BODY_CHARS}`
   );
   saveDigestOutput(dir, DEFAULT_DIGEST_JOB_ID, body);
   const report = evaluateDigestQa(dir, DEFAULT_DIGEST_JOB_ID);
@@ -220,7 +220,7 @@ test("evaluateDigestQa warns but passes when digest 3501-12000 chars", () => {
   assert.equal(hardLen?.ok, true);
 });
 
-test("evaluateDigestQa fails when digest exceeds 12000 chars", () => {
+test("evaluateDigestQa fails when the digest exceeds the hard body cap", () => {
   const dir = setupDir();
   const at = new Date(Date.now() - 2 * 3_600_000).toISOString();
   saveCronState(dir, {
@@ -237,8 +237,9 @@ test("evaluateDigestQa fails when digest exceeds 12000 chars", () => {
       },
     },
   });
-  const body = ("📬 TParser · день\nhttps://t.me/x/1\n").repeat(700);
-  assert.ok(body.length > 12_000);
+  const line = "📬 TParser · день\nhttps://t.me/x/1\n";
+  const body = line.repeat(Math.ceil(DIGEST_QA_MAX_BODY_CHARS / line.length) + 10);
+  assert.ok(body.length > DIGEST_QA_MAX_BODY_CHARS);
   saveDigestOutput(dir, DEFAULT_DIGEST_JOB_ID, body);
   const report = evaluateDigestQa(dir, DEFAULT_DIGEST_JOB_ID);
   assert.equal(report.ok, false);

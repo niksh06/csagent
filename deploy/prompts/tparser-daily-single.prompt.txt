@@ -1,115 +1,95 @@
-TParser **daily digest** — single agent (no delegates). Produce the full daily digest in ONE run.
-Window: **last 24 hours** — compute `WINDOW_START = now − 24h` (UTC), `WINDOW_END = now`.
+TParser **daily digest** — single agent. Write the digest from the feed below.
 
-Two tiers of output: a few **deep blocks** for what matters most, plus a one-line
-**index** so the rest of the day is at least visible and clickable.
+**You do not fetch anything.** The `tparser-digest-feed` cron builtin has already
+pulled the 24h window from the API, bucketed it by topic and chosen what the
+digest covers — top-15% of each topic by `priority` (floor 10, cap 45) plus every
+`alert` and every post with `urgency >= 0.70`. Selection is deterministic and
+already done. Your job is the part a model is actually good at: what it means.
 
-**Your entire final message IS the digest.** Its first character must be `📬`.
-Everything you print is delivered to the user verbatim — a line like "Данные
-собраны, ниже дайджест" is not a note to yourself, it is the first thing he reads.
-Do not announce what you are about to do, do not explain deviations, do not
-summarise your own process. If a rule below made you choose differently, just
-choose — silently. Russian.
+Do not call the API, do not read `.env`, do not run curl. There is no token to
+handle here — earlier versions pasted it into shell commands and leaked it into
+transcripts.
+
+## Why selection is not yours to redo
+
+`priority` is calibrated per rubric and is NOT comparable across them (measured
+on 4361 posts / 5 days): Programming tops out at 0.79 and can never reach 0.80,
+while AI Security's *median* is 0.81. The score is also clumped — 306 AI posts
+share exactly 0.683. So there is no threshold you could apply that would mean
+the same thing in two topics. Rank inside a topic is the only comparable
+quantity, and the feed is already ranked. Take it as given.
+
+## Input
+
+{{context_from}}
+
+If the block above is empty or missing, say so in one line and stop — do not
+invent a digest.
 
 ## Setup
 
-1. `memory_get` name=`tparser-workflow` — tag/sphere rules and interests.
+`memory_get` name=`tparser-workflow` — interests and framing for the вердикт.
 
-2. **API token.** It lives in `.env` in the working directory under `API_AUTH_TOKEN`.
-   Read it into a shell variable and use it by reference — **never print it, never
-   paste its value into a command**. It ends up in the transcript otherwise.
+## What to write
 
-   ```
-   TOKEN=$(grep -E '^API_AUTH_TOKEN=' .env | cut -d= -f2- | tr -d '"')
-   curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8002/api/..."
-   ```
+**Your entire final message IS the digest.** Its first character must be `📬`.
+Everything you print is delivered verbatim — a line like "Данные собраны, ниже
+дайджест" is not a note to yourself, it is the first thing he reads. Do not
+announce what you are about to do, do not explain deviations, do not summarise
+your own process. If a rule below made you choose differently, just choose —
+silently. Russian.
 
-3. **Fetch the window** — use `by-date-range`, paginated by `offset`:
+**Tier 1 — глубокие блоки, ≤6.**
+- One block for every topic that has at least one selected post — a topic with
+  posts is never silent. Then fill the remaining slots with the highest-ranked
+  posts left over, regardless of topic.
+- **One story per Tier 1.** If a post covers a story already shown in another
+  block (the same incident reported by a second channel), skip it and take the
+  next distinct one. Six blocks about three stories is worse than six about six.
+- Prefer `!`-flagged posts: they are alerts or high-urgency and must not be
+  buried in the index.
 
-   ```
-   GET /api/posts/by-date-range?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>&limit=200&offset=<N>
-   ```
-
-   - `date_from` = WINDOW_START's date, `date_to` = WINDOW_END's date + 1 day (covers the UTC boundary).
-   - Response key is **`posts`** (not `items`).
-   - Increase `offset` by 200 until a page returns fewer than 200 rows. Expect ~600–700 posts/day.
-   - Then keep only posts whose `date` >= WINDOW_START.
-
-   **No hydration step is needed** — `by-date-range` already returns `priority`,
-   `topic_tags`, `category`, `summary`, `message`, `urls`, `urgency`.
-
-   Do **not** use `/api/posts/recent-live`: its `after_rowid` is a forward
-   live-tail cursor (`WHERE seq > ?` with `ORDER BY rowid DESC`), so paging
-   backwards with it returns the same page forever. `/api/feed` is not needed either.
-
-4. Bucket each post into **one** topic by `topic_tags` (else `category`, else summary
-   keywords). A post belongs to at most one topic (highest-priority match).
-
-## Topics (five buckets)
-
-- **AI / ML / LLM** — AI, ML, LLM, benchmark, research, agent, RAG, fine-tuning
-- **AISec / MLSec** — AISec, MLSec, LLM security, adversarial, jailbreak, prompt injection, model abuse
-- **InfoSec / AppSec** — InfoSec, AppSec, security, vulnerability, CVE, exploit, malware, incident
-- **Programming / devtools** — programming, devtools, language, framework, open source, library, IDE
-- **DevSecOps / DevOps** — DevSecOps, DevOps, CI/CD, K8s, kubernetes, cloud, infra, SRE, terraform
-
-## Selection — read this carefully, the counts must add up
-
-**Tier 1 — deep blocks, ≤6 total.**
-- First, **one block for every topic that has at least one post** (its highest-`priority` post).
-  A topic with posts is never silent.
-- Then fill the remaining slots (up to 6 total) with the highest-`priority` posts left over,
-  regardless of topic.
-- **One story per Tier 1.** If a post covers a story already shown in another block
-  (the same incident/release reported by a second channel), skip it and take the next
-  unique one. Six blocks about three stories is worse than six about six.
-
-**Tier 2 — index, ≤35 lines total, ≤10 per topic.**
-- Excluding posts already used in Tier 1.
-- Allocate **round-robin across topics** — one line per topic per pass, each topic
-  contributing its next-highest `priority` post — until you hit 35 lines or run out.
-  Do **not** fill one topic to 10 before starting the next: a 6-post topic would be
-  squeezed out entirely by a 170-post one.
-- One line each. No verdicts, no bullets.
-
-## Formats
+**Tier 2 — индекс: every remaining selected post, one line each.**
+Not a sample of them — all of them, grouped by topic, highest rank first. That
+is the whole point of the feed: the count in the header must match what you
+printed.
 
 Deep block (**≤500 characters each**):
 
 ```
-### {channel_or_title} · `{priority}` · {primary_tag}
+### {channel} · `{priority}` · {topic}
 **Суть:** 1–2 предложения — главное утверждение, названные сущности.
 **Вердикт:** 1–2 предложения — что это значит в разрезе tparser-workflow.
-https://t.me/c/{short}/{post_id} · {best external URL or «нет URL»}
+{tg link} · {external link or «нет URL»}
 ```
 
-Index line (**≤105 characters each**):
+Index line (**≤130 characters each**):
 
 ```
-`{priority}` {6–9 слов о сути} — https://t.me/c/{short}/{post_id}
+`{priority}` {6–9 слов о сути} — {tg link}
 ```
 
-`short` = str(channel_id) with a leading `-100` stripped. Never `t.me/@channel`.
-Never use markdown link syntax for `t.me` links.
+Copy links character for character from the feed. Never rewrite a `t.me/c/…`
+link, never use markdown link syntax for it, never invent one.
 
-**Deep check** (optional, **≤2 per run**): for a Tier-1 post with an external http(s)
-link and a thin summary, use `browser_navigate` + `browser_snapshot` (browser-ops) on
-the one primary URL. Never invent content.
+**Deep check** (optional, **≤2 per run**): for a Tier-1 post with an external
+http(s) link and a thin summary, use `browser_navigate` + `browser_snapshot`
+(browser-ops) on that one URL. Never invent content.
 
-**Dedup:** window only; do **not** write `memory_fact_add` / `seen_post` facts. No Obsidian writes.
+**Dedup:** window only; do not write `memory_fact_add` / `seen_post` facts. No
+Obsidian writes.
 
 ## Output
 
-**Budget ≤8000 characters total** (delivered as ~2 Telegram messages — the sender
-splits automatically, do not split it yourself). The caps above are chosen to fit:
-header ≤700 + 6×500 + 35×105 ≈ 7400. If you are over, drop index lines from the
-bottom (lowest priority) first, then compress вердикты — **never drop `t.me/` links**
-from lines you keep, and never drop a topic's single Tier-1 block.
+**Budget ≤26000 characters.** The gateway sends this as a rich message (limit
+32000), so ~120 index lines fit comfortably — do not trim to look tidy. If you
+genuinely exceed the budget, compress вердикты first; drop index lines only as a
+last resort, and never drop a `!`-flagged post or a topic's only deep block.
 
 ```
-📬 TParser · день · {WINDOW_END}
-Разобрано {total} постов · подробно {deep_n} · в индексе {index_n} · вне тем {offtopic_n}
-Охват: {coverage}% дня в этой сводке ({deep_n}+{index_n} из {total}) · весь день — файлом рядом
+📬 TParser · день · {дата}
+Поток {total} · в сводке {selected} · срочных {urgent} · вне тем {offtopic} · медиа без текста {media_no_text}
+Охват: {coverage}% потока в этой сводке
 
 **TL;DR:** 2–3 предложения — главный итог дня.
 
@@ -121,14 +101,14 @@ from lines you keep, and never drop a topic's single Tier-1 block.
 
 ## 🔎 Подробно
 
-(≤6 deep blocks, highest priority first, one guaranteed per non-empty topic)
+(≤6 глубоких блоков, сначала `!`-помеченные, по одному гарантированно на непустую тему)
 
 ---
 
-## 📄 Остальное за день
+## 📄 Остальное отобранное
 
 ### AI / ML / LLM
-(≤10 index lines)
+(все оставшиеся отобранные по теме, по строке)
 
 ### AISec / MLSec
 …
@@ -143,23 +123,24 @@ from lines you keep, and never drop a topic's single Tier-1 block.
 …
 
 ---
-Полный срез дня — отдельным файлом рядом. В чате: «топ-50», «только InfoSec», «только AI».
+В чате: «топ-50», «только InfoSec», «только AI» для углубления.
 ```
 
 ## Rules
 
 - Russian. **TL;DR first**, immediately after the header lines.
-- The header counts must be real: `{total}` = posts in window, `{deep_n}` = Tier-1
-  blocks printed, `{index_n}` = index lines printed, `{offtopic_n}` = posts that
-  matched none of the five topics. Do not round or invent them. `{offtopic_n}` is
-  there deliberately: roughly a third of a day matches no bucket, and that should
-  be visible rather than quietly dropped.
-- `{coverage}` = `round(100 * (deep_n + index_n) / total, 1)` — compute it, do not
-  estimate it. This digest is a curated top-N (~7% of a day); the complete day
-  ships beside it as a file, built deterministically by the `tparser-day-slice`
-  cron builtin. Printing the real number keeps the two honest about their jobs.
-  If it drops sharply while `{total}` is normal, something upstream broke.
-- If a topic has 0 posts: one line «нет релевантных постов» and no index section for it.
-- Do not invent posts. Do not re-fetch the API beyond the steps above.
+- **The header numbers come from the feed's «СЧЁТЧИКИ ДЛЯ ШАПКИ» block. Copy
+  them. Do not recompute, do not round, do not estimate.** `{n1}`…`{n5}` are the
+  per-topic «отобрано N из M» counts, also given in the feed.
+- `{coverage}` says how much of the day this digest carries. It is deliberately
+  a selection, not the whole day — printing the real number beats implying the
+  day was small. If it drops sharply while `{total}` looks normal, something
+  upstream broke and that is worth a line.
+- `media_no_text` are posts with no caption at all (media, memes). They are
+  counted, never summarised — there is nothing in them to summarise.
+- If a topic has 0 selected posts: one line «нет постов за окно», no index
+  section for it.
+- Do not invent posts, links, or numbers.
 
-If all topics empty: `📬 TParser · день · {WINDOW_END} · релевантных постов не было.`
+If the feed contains no selected posts at all:
+`📬 TParser · день · {дата} · релевантных постов не было.`

@@ -38,9 +38,9 @@ import {
 } from "./selfMonitor.js";
 import { executeMemoryAuditBuiltin } from "./memoryAudit.js";
 import {
-  buildTparserDaySlice,
-  TPARSER_DAY_SLICE_WINDOW_HOURS,
-} from "./tparserDaySlice.js";
+  buildTparserDigestFeed,
+  TPARSER_FEED_WINDOW_HOURS,
+} from "./tparserDigestFeed.js";
 import { exportRecentSessions } from "./sessionExport.js";
 import { ingestRecentSessions } from "./sessionIngest.js";
 import { mineCursorTranscripts } from "./cursorTranscriptMine.js";
@@ -406,39 +406,37 @@ export async function executeCronJob(
       });
     }
   }
-  if (job.builtin === "tparser-day-slice") {
+  if (job.builtin === "tparser-digest-feed") {
     try {
-      const slice = await buildTparserDaySlice({
+      const built = await buildTparserDigestFeed({
         cwd: workDir,
-        windowHours: job.topicWindowHours ?? TPARSER_DAY_SLICE_WINDOW_HOURS,
+        windowHours: job.topicWindowHours ?? TPARSER_FEED_WINDOW_HOURS,
       });
-      const s = slice.data.stats;
-      // Zero posts in a 24h window is not an empty day — TParser ingests ~550.
-      // Report it as a failure so self-monitor and /status see it, instead of
-      // shipping a cheerful empty file.
-      if (s.posts === 0) {
+      const s = built.feed.stats;
+      // Zero posts in a 24h window is not an empty day — TParser ingests ~870.
+      // Fail so self-monitor and /status see it, and so the downstream digest
+      // is skipped rather than written from nothing.
+      if (s.total === 0) {
         return withDuration(started, {
           ok: false,
           exitCode: EXIT.software,
-          message: "tparser-day-slice: 0 posts in window — TParser ingest or API is down",
+          message: "tparser-digest-feed: 0 posts in window — TParser ingest or API is down",
         });
       }
+      // Silent on success: the output is the digest's INPUT, not a message.
+      // A failure is not silent — that is the only way the feed can speak up.
       return withDuration(started, {
         ok: true,
         exitCode: EXIT.ok,
-        message: `tparser-day-slice: ${s.posts} post(s) (${s.onTopic} on-topic, ${s.offTopic} off-topic) from ${s.channels} channel(s), ${slice.markdown.length} chars`,
-        attachment: {
-          filename: slice.filename,
-          content: slice.markdown,
-          caption: slice.caption,
-          contentType: "text/markdown; charset=utf-8",
-        },
+        silent: true,
+        message: `tparser-digest-feed: selected ${s.selected}/${s.total} (${s.coveragePct}% of flow, ${s.coverageReadablePct}% of posts with text), ${s.urgent} urgent, ${s.empty} media-only, ${built.text.length} chars`,
+        output: built.text,
       });
     } catch (e) {
       return withDuration(started, {
         ok: false,
         exitCode: EXIT.software,
-        message: `tparser-day-slice failed: ${e instanceof Error ? e.message : String(e)}`,
+        message: `tparser-digest-feed failed: ${e instanceof Error ? e.message : String(e)}`,
       });
     }
   }

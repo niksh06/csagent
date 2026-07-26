@@ -26,20 +26,28 @@ export const DIGEST_MAX_DURATION_MS = 60 * 60_000;
 /** Minimum topic delegates that must succeed. */
 export const DIGEST_MIN_TOPIC_OK = 4;
 
-/** Max digest body size for automated QA (Telegram splits long digests). */
-export const DIGEST_QA_MAX_BODY_CHARS = 12_000;
+/**
+ * Max digest body size for automated QA.
+ *
+ * Raised 12_000 → 30_000 on 2026-07-27, just under the `sendRichMessage` limit
+ * of 32_000 the gateway actually delivers with. The digest now carries ~120
+ * pre-selected posts (13% of a ~870-post day) instead of ~40, which lands
+ * around 16 KB — the old ceiling would have failed QA on every healthy run.
+ */
+export const DIGEST_QA_MAX_BODY_CHARS = 30_000;
 
 /**
  * Target length for Telegram UX (I-60); over this → QA warn, not FAIL.
  *
- * Raised 3500 → 8000 on 2026-07-27. The 3500 encoded a one-message digest, and
- * that single cap was what limited the daily digest to ~6 posts out of ~600 (~1%
- * coverage): a post block runs 450-550 chars, so six of them plus a header filled
- * the budget exactly. The digest is now deliberately two-tier and ~2 messages, so
- * every run would have tripped this warn from here on — and a check that fires
- * every day is a check nobody reads.
+ * Raised 3500 → 8000 → 20000 on 2026-07-27. The original 3500 encoded a
+ * one-message digest, and that single cap was what held the daily digest to ~6
+ * posts out of ~870 (~1% coverage): a post block runs 450-550 chars, so six of
+ * them plus a header filled the budget exactly. Selection now happens in code
+ * (`tparserDigestFeed`) and the transport is `sendRichMessage`, not the 4096
+ * classic limit — a healthy digest is ~16 KB, so a warn below that would fire
+ * every night, and a check that fires every day is a check nobody reads.
  */
-export const DIGEST_TG_TARGET_CHARS = 8_000;
+export const DIGEST_TG_TARGET_CHARS = 20_000;
 
 export interface DigestQaCheck {
   name: string;
