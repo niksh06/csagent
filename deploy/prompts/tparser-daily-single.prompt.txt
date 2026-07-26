@@ -1,17 +1,43 @@
 TParser **daily digest** — single agent (no delegates). Produce the full daily digest in ONE run.
-Window: **last 24 hours** — compute `WINDOW_START = now − 24h` (UTC), `WINDOW_END = now`. **Do not use /api/feed.**
+Window: **last 24 hours** — compute `WINDOW_START = now − 24h` (UTC), `WINDOW_END = now`.
 
-You do the whole job yourself: fetch once, bucket into five topics, analyze, then output the final Telegram digest (Russian). Output **ONLY** the final Telegram message body — no preamble, no tool narration.
+Two tiers of output: a few **deep blocks** for what matters most, plus a one-line
+**index** so the rest of the day is at least visible and clickable. Output **ONLY**
+the final Telegram message body (Russian) — no preamble, no tool narration.
 
-## Setup (once)
+## Setup
 
 1. `memory_get` name=`tparser-workflow` — tag/sphere rules and interests.
-2. Fetch posts **once**:
-   - `GET http://127.0.0.1:8002/api/posts/recent-live?limit=300`
-   - Paginate `after_rowid` until posts are older than `WINDOW_START`.
-   - Keep items with `created_at` (or `date`) >= `WINDOW_START`.
-3. Hydrate: batch `GET /api/posts/by-keys?keys=channel_id:post_id,...` (max 50 keys per call).
-4. Bucket each post into **one** topic by `topic_tags` (else summary keywords). A post belongs to at most one topic (highest-priority match).
+
+2. **API token.** It lives in `.env` in the working directory under `API_AUTH_TOKEN`.
+   Read it into a shell variable and use it by reference — **never print it, never
+   paste its value into a command**. It ends up in the transcript otherwise.
+
+   ```
+   TOKEN=$(grep -E '^API_AUTH_TOKEN=' .env | cut -d= -f2- | tr -d '"')
+   curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8002/api/..."
+   ```
+
+3. **Fetch the window** — use `by-date-range`, paginated by `offset`:
+
+   ```
+   GET /api/posts/by-date-range?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>&limit=200&offset=<N>
+   ```
+
+   - `date_from` = WINDOW_START's date, `date_to` = WINDOW_END's date + 1 day (covers the UTC boundary).
+   - Response key is **`posts`** (not `items`).
+   - Increase `offset` by 200 until a page returns fewer than 200 rows. Expect ~600–700 posts/day.
+   - Then keep only posts whose `date` >= WINDOW_START.
+
+   **No hydration step is needed** — `by-date-range` already returns `priority`,
+   `topic_tags`, `category`, `summary`, `message`, `urls`, `urgency`.
+
+   Do **not** use `/api/posts/recent-live`: its `after_rowid` is a forward
+   live-tail cursor (`WHERE seq > ?` with `ORDER BY rowid DESC`), so paging
+   backwards with it returns the same page forever. `/api/feed` is not needed either.
+
+4. Bucket each post into **one** topic by `topic_tags` (else `category`, else summary
+   keywords). A post belongs to at most one topic (highest-priority match).
 
 ## Topics (five buckets)
 
@@ -21,38 +47,61 @@ You do the whole job yourself: fetch once, bucket into five topics, analyze, the
 - **Programming / devtools** — programming, devtools, language, framework, open source, library, IDE
 - **DevSecOps / DevOps** — DevSecOps, DevOps, CI/CD, K8s, kubernetes, cloud, infra, SRE, terraform
 
-## Per-post analysis (within each topic, priority desc)
+## Selection — read this carefully, the counts must add up
 
-Analyze **all** matched posts per topic. For each post keep this block:
+**Tier 1 — deep blocks, ≤6 total.**
+- First, **one block for every topic that has at least one post** (its highest-`priority` post).
+  A topic with posts is never silent.
+- Then fill the remaining slots (up to 6 total) with the highest-`priority` posts left over,
+  regardless of topic.
+
+**Tier 2 — index, ≤35 lines total, ≤10 per topic.**
+- Excluding posts already used in Tier 1.
+- Allocate **round-robin across topics** — one line per topic per pass, each topic
+  contributing its next-highest `priority` post — until you hit 35 lines or run out.
+  Do **not** fill one topic to 10 before starting the next: a 6-post topic would be
+  squeezed out entirely by a 170-post one.
+- One line each. No verdicts, no bullets.
+
+## Formats
+
+Deep block (**≤500 characters each**):
 
 ```
-### {n}. {channel_or_title} · `{priority}` · {primary_tag}
-
-**Структура поста:**
-- Bullets preserving the gist, key claims, named entities, and **all URLs** from `urls`/message (external links verbatim).
-
-**Вердикт агента:**
-2–4 предложения: что это значит в разрезе текущих интересов (tparser-workflow). Если ссылок несколько — какая главная и почему.
-
-**Telegram:** https://t.me/c/{short}/{post_id}
-**Источник:** {best external URL or «(нет URL)»}
+### {channel_or_title} · `{priority}` · {primary_tag}
+**Суть:** 1–2 предложения — главное утверждение, названные сущности.
+**Вердикт:** 1–2 предложения — что это значит в разрезе tparser-workflow.
+https://t.me/c/{short}/{post_id} · {best external URL or «нет URL»}
 ```
 
-Link rules: `short` = str(channel_id) with leading `-100` stripped. Never `t.me/@channel`. Pick the most relevant external URL for Источник; list others under Структура.
+Index line (**≤105 characters each**):
 
-**Deep check** (optional, ≤1 per post): for a post with external http(s) link and thin summary, use `browser_navigate` + `browser_snapshot` (browser-ops) on the **one** primary URL, or `GET /api/posts/{post_id}/analysis?channel_id=`. Never invent content.
+```
+`{priority}` {6–9 слов о сути} — https://t.me/c/{short}/{post_id}
+```
 
-**Dedup:** window `WINDOW_START`–`WINDOW_END` only; do **not** write `memory_fact_add` / `seen_post` facts. No Obsidian writes.
+`short` = str(channel_id) with a leading `-100` stripped. Never `t.me/@channel`.
+Never use markdown link syntax for `t.me` links.
 
-## Output (the only thing you print)
+**Deep check** (optional, **≤2 per run**): for a Tier-1 post with an external http(s)
+link and a thin summary, use `browser_navigate` + `browser_snapshot` (browser-ops) on
+the one primary URL. Never invent content.
 
-**Hard limit ≤3500 characters** (one Telegram message, ~2 min read). If over budget, compress вердикты and drop lower-priority posts — **never drop `t.me/` links**. Keep ≤5 posts per topic (top by priority) when a topic is large.
+**Dedup:** window only; do **not** write `memory_fact_add` / `seen_post` facts. No Obsidian writes.
+
+## Output
+
+**Budget ≤8000 characters total** (delivered as ~2 Telegram messages — the sender
+splits automatically, do not split it yourself). The caps above are chosen to fit:
+header ≤700 + 6×500 + 35×105 ≈ 7400. If you are over, drop index lines from the
+bottom (lowest priority) first, then compress вердикты — **never drop `t.me/` links**
+from lines you keep, and never drop a topic's single Tier-1 block.
 
 ```
 📬 TParser · день · {WINDOW_END}
-5 тем · {total_posts} постов проанализировано
+Разобрано {total} постов · подробно {deep_n} · в индексе {index_n} · вне тем {offtopic_n}
 
-**TL;DR:** 2–3 предложения — главный итог дня (first content after the header stats).
+**TL;DR:** 2–3 предложения — главный итог дня.
 
 ## Сводка дня
 - 3–5 bullets: главные тренды across topics.
@@ -60,32 +109,42 @@ Link rules: `short` = str(channel_id) with leading `-100` stripped. Never `t.me/
 
 ---
 
-## AI / ML / LLM
-(per-post blocks: Структура + Вердикт + Telegram line; top 5 by priority if >5)
+## 🔎 Подробно
 
-## AISec / MLSec
-…
-
-## InfoSec / AppSec
-…
-
-## Programming / devtools
-…
-
-## DevSecOps / DevOps
-…
+(≤6 deep blocks, highest priority first, one guaranteed per non-empty topic)
 
 ---
 
+## 📄 Остальное за день
+
+### AI / ML / LLM
+(≤10 index lines)
+
+### AISec / MLSec
+…
+
+### InfoSec / AppSec
+…
+
+### Programming / devtools
+…
+
+### DevSecOps / DevOps
+…
+
+---
 В чате: «топ-50», «только InfoSec», «только AI» для углубления.
 ```
 
 ## Rules
 
-- Russian. **TL;DR first**, immediately after the header line, before `## Сводка дня`.
-- Keep each post block intact: Структура поста, Вердикт агента, Telegram on its own line. Do not use markdown link syntax for t.me.
-- If a topic has 0 posts: one line «нет релевантных постов».
-- Compress when over 3500 chars — shorten вердикт, trim lower-priority posts, never drop links.
+- Russian. **TL;DR first**, immediately after the header lines.
+- The header counts must be real: `{total}` = posts in window, `{deep_n}` = Tier-1
+  blocks printed, `{index_n}` = index lines printed, `{offtopic_n}` = posts that
+  matched none of the five topics. Do not round or invent them. `{offtopic_n}` is
+  there deliberately: roughly a third of a day matches no bucket, and that should
+  be visible rather than quietly dropped.
+- If a topic has 0 posts: one line «нет релевантных постов» and no index section for it.
 - Do not invent posts. Do not re-fetch the API beyond the steps above.
 
 If all topics empty: `📬 TParser · день · {WINDOW_END} · релевантных постов не было.`
