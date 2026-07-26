@@ -35,12 +35,13 @@ services:
       context: ./embedder
       dockerfile: Dockerfile
     restart: unless-stopped
+    # No HF cache mount (I-172): the model is baked into the image, so a bind mount
+    # here would only shadow it with a host directory that gets cleaned for disk
+    # space. Weights and the offline flags both live in the Dockerfile; changing the
+    # model means rebuilding, not re-mounting.
     environment:
-      EMBED_MODEL: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
-    volumes:
-      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
     ports:
       - "127.0.0.1:8014:8000"
     healthcheck:

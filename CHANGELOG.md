@@ -18,6 +18,7 @@ All notable changes to **csagent** are documented here. Format loosely follows [
 
 ### Changed
 
+- **Embedder model is baked into the image instead of mounted from the host (I-172)** — `irida-embedder` ran `HF_HUB_OFFLINE=1` on top of a **read-only** bind mount of `~/.cache/huggingface`, a combination that cannot self-heal: with the host cache empty the service can neither start nor download what it needs. An OrbStack restart on 2026-07-26 surfaced it — the cache had been cleared (this machine runs low on disk and gets cleaned by hand), the model had survived only in the running container's memory, and semantic memory search was down until the cache was rebuilt manually. Since autoRag now injects memory on every chat turn, that is a load-bearing service failing silently. The Dockerfile now downloads the weights at build time (`ARG EMBED_MODEL`, `HF_HOME=/opt/hf`, offline flags set only *after* the download) and the compose bind mount is gone — leaving it would have shadowed the baked model with the very directory that gets cleaned. Verified with `~/.cache/huggingface` entirely absent: container healthy, `/embed` returns a 768-dim vector, autoRag hits again. The host cache is still required by `engram` and `aleph-aleph-embedder-1`, so it must not be deleted.
 - **`csagent-browser` MCP renamed to `irida-browser`** — continues the csagent→Irida rebrand; the constant, the stdio server's advertised name, and the `browser-ops` skill all move together.
 
 ### Added
