@@ -1,16 +1,8 @@
 /**
  * Optional cron completion notifications (webhook or direct Telegram).
  */
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
-import { loadConfig } from "./config.js";
 import { resolveTelegramBotToken } from "./credentials.js";
-import {
-  telegramSendDocument,
-  telegramSendLongMessage,
-  telegramSendMessage,
-  type TelegramFetch,
-} from "./gatewayTelegram.js";
+import { telegramSendLongMessage, telegramSendMessage, type TelegramFetch } from "./gatewayTelegram.js";
 import { enqueueOutbox, sendOutboxParkAck } from "./gatewayOutbox.js";
 import type { CronJob } from "./cronJobs.js";
 import {
@@ -20,11 +12,7 @@ import {
   saveDigestQaResult,
   type DigestQaReport,
 } from "./digestQa.js";
-import {
-  formatCronPostMortem,
-  type CronExecuteResult,
-  type CronNotifyAttachment,
-} from "./cronRunRecord.js";
+import { formatCronPostMortem, type CronExecuteResult } from "./cronRunRecord.js";
 
 const httpFetch: TelegramFetch = (url, init) => globalThis.fetch(url, init);
 
@@ -169,46 +157,8 @@ async function sendDigestQaFollowUp(
 
 function formatNotifyText(payload: CronNotifyPayload, exec: CronExecuteResult): string {
   if (exec.output?.trim()) return exec.output.trim();
-  // An attachment-only job says everything in its caption; the generic status
-  // line would just be a second, emptier message next to the file.
-  if (exec.attachment && payload.ok) return "";
   const status = payload.ok ? "OK" : "FAILED";
   return `[cron:${payload.jobId}] ${status}\n${payload.message.slice(0, 2000)}`;
-}
-
-/**
- * Persist the attachment before attempting delivery. The outbox only holds
- * text, so a network blip would otherwise destroy a file the job spent real
- * work building; on disk it survives and the parked notice can point at it.
- */
-export function saveCronAttachment(
-  dir: string,
-  jobId: string,
-  attachment: CronNotifyAttachment
-): string | null {
-  try {
-    const cfg = loadConfig(dir);
-    const root = resolve(dir, cfg.stateDir);
-    mkdirSync(root, { recursive: true });
-    const safe = basename(attachment.filename).replace(/[^A-Za-z0-9._-]/g, "_");
-    const prefix = `cron.attach.${jobId}.`;
-    const name = `${prefix}${safe}`;
-    const path = resolve(root, name);
-    writeFileSync(path, attachment.content, { encoding: "utf8", mode: 0o600 });
-    // Keep exactly one copy per job: this is a crash buffer, not an archive,
-    // and the day slice is ~250 KB — a daily job would otherwise quietly grow
-    // the state dir by ~90 MB a year on a machine that already runs tight.
-    // Pruned only AFTER the new write lands, so a failed write keeps the old one.
-    for (const f of readdirSync(root)) {
-      if (f.startsWith(prefix) && f !== name) rmSync(resolve(root, f), { force: true });
-    }
-    return path;
-  } catch (e) {
-    console.error(
-      `[cron] attachment save failed job=${jobId}: ${e instanceof Error ? e.message : String(e)}`
-    );
-    return null;
-  }
 }
 
 interface TelegramNotifyPart {
@@ -236,28 +186,6 @@ function parkTelegramNotifyParts(
   return parked;
 }
 
-/** The file could not be uploaded — park a pointer to the on-disk copy. */
-function parkAttachmentNotice(
-  dir: string,
-  chatId: string,
-  attachment: CronNotifyAttachment,
-  savedPath: string | null
-): number {
-  const where = savedPath
-    ? `Файл сохранён локально: ${savedPath}`
-    : "Сохранить файл на диск тоже не удалось — содержимое потеряно.";
-  try {
-    enqueueOutbox(dir, {
-      chatId,
-      text: `📄 ${attachment.filename} не ушёл в Telegram.\n${where}`,
-      format: "plain",
-    });
-    return 1;
-  } catch {
-    return 0;
-  }
-}
-
 export async function sendCronJobNotify(
   job: CronJob,
   exec: CronExecuteResult,
@@ -283,8 +211,6 @@ export async function sendCronJobNotify(
     saveDigestOutput(dir, job.id, exec.output);
   }
   const postMortem = job.topicDelegates || job.recordDigest ? formatCronPostMortem(job.id, exec, at) : "";
-  const attachment = exec.attachment;
-  const savedPath = attachment ? saveCronAttachment(dir, job.id, attachment) : null;
   try {
     if (target.mode === "telegram") {
       const token = resolveTelegramBotToken(dir, target.tokenEnv).value;
@@ -301,21 +227,12 @@ export async function sendCronJobNotify(
           const p = parts[nextIndex]!;
           await telegramSendLongMessage(token, target.chatId, p.text, httpFetch, { format: p.format });
         }
-        if (attachment) {
-          await telegramSendDocument(token, target.chatId, attachment, httpFetch);
-          console.error(
-            `[cron] notify attachment sent job=${job.id} file=${attachment.filename} bytes=${attachment.content.length}`
-          );
-        }
         await sendDigestQaFollowUp(job, exec, at, dir, target);
       } catch (e) {
         console.error(
           `[cron] notify failed job=${job.id}: ${e instanceof Error ? e.message : String(e)}`
         );
-        let parked = parkTelegramNotifyParts(dir, target.chatId, parts, nextIndex);
-        if (attachment) {
-          parked += parkAttachmentNotice(dir, target.chatId, attachment, savedPath);
-        }
+        const parked = parkTelegramNotifyParts(dir, target.chatId, parts, nextIndex);
         if (parked > 0) {
           console.error(`[cron] notify parked in outbox job=${job.id} parts=${parked}`);
           await sendOutboxParkAck(
@@ -329,15 +246,7 @@ export async function sendCronJobNotify(
     const secret = resolveEnv(target.secretEnv);
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (secret) headers["X-Gateway-Secret"] = secret;
-    // The webhook contract is text-only — say where the file is instead of
-    // pretending it was delivered.
-    const attachNote = attachment
-      ? [
-          attachment.caption?.trim() || `📄 ${attachment.filename}`,
-          savedPath ? `Файл: ${savedPath}` : "Файл сохранить не удалось.",
-        ].join("\n")
-      : "";
-    const webhookText = [text, postMortem, attachNote].filter(Boolean).join("\n\n---\n\n");
+    const webhookText = postMortem ? `${text}\n\n---\n\n${postMortem}` : text;
     const res = await httpFetch(target.webhookUrl, {
       method: "POST",
       headers,

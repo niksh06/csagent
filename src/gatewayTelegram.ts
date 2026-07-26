@@ -478,49 +478,6 @@ export async function telegramSendLongMessage(
   return sent;
 }
 
-/** Bot API `sendDocument` caption limit. */
-export const TELEGRAM_CAPTION_MAX = 1024;
-
-export interface TelegramDocument {
-  filename: string;
-  content: string | Uint8Array;
-  /** Shown above the file; silently truncated by Telegram past the limit. */
-  caption?: string;
-  contentType?: string;
-}
-
-/**
- * Upload a file to a chat.
- *
- * Everything else in this layer posts JSON, but `sendDocument` needs
- * multipart/form-data — so the Content-Type header is deliberately NOT set:
- * fetch must generate the boundary itself. Used for payloads that cannot be a
- * message at all (the TParser day slice is ~150 KB, i.e. ~40 messages).
- */
-export async function telegramSendDocument(
-  token: string,
-  chatId: string,
-  doc: TelegramDocument,
-  fetchFn: TelegramFetch = fetch
-): Promise<void> {
-  const bytes =
-    typeof doc.content === "string" ? new TextEncoder().encode(doc.content) : doc.content;
-  const form = new FormData();
-  form.set("chat_id", chatId);
-  if (doc.caption?.trim()) form.set("caption", doc.caption.slice(0, TELEGRAM_CAPTION_MAX));
-  form.set(
-    "document",
-    new Blob([bytes as BlobPart], { type: doc.contentType ?? "text/markdown; charset=utf-8" }),
-    doc.filename
-  );
-  const res = await fetchFn(`https://api.telegram.org/bot${token}/sendDocument`, {
-    method: "POST",
-    body: form,
-  });
-  const body = (await res.json()) as { ok: boolean; description?: string };
-  if (!body.ok) throw new Error(body.description ?? "telegram sendDocument failed");
-}
-
 export async function telegramSendChatAction(
   token: string,
   chatId: string,

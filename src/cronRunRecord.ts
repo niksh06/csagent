@@ -12,21 +12,6 @@ export interface CronTopicSummary {
   summary: string;
 }
 
-/**
- * A file the job produced, delivered as a Telegram document instead of text.
- *
- * Result-driven rather than a `notify` config flag on purpose: a job that emits
- * 150 KB knows it is a file, and a missing config key must not silently turn it
- * into forty chat messages.
- */
-export interface CronNotifyAttachment {
-  filename: string;
-  content: string;
-  /** Caption shown above the file (Telegram truncates past 1024 chars). */
-  caption?: string;
-  contentType?: string;
-}
-
 export interface CronExecuteResult {
   ok: boolean;
   exitCode: ExitCode;
@@ -37,8 +22,6 @@ export interface CronExecuteResult {
   topicSummaries?: CronTopicSummary[];
   /** Suppress notify delivery (script jobs with empty stdout = healthy-quiet). */
   silent?: boolean;
-  /** Deliver as an uploaded file (see CronNotifyAttachment). */
-  attachment?: CronNotifyAttachment;
 }
 
 export function formatDurationMs(ms: number): string {
