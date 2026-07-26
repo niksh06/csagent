@@ -2,8 +2,14 @@ TParser **daily digest** — single agent (no delegates). Produce the full daily
 Window: **last 24 hours** — compute `WINDOW_START = now − 24h` (UTC), `WINDOW_END = now`.
 
 Two tiers of output: a few **deep blocks** for what matters most, plus a one-line
-**index** so the rest of the day is at least visible and clickable. Output **ONLY**
-the final Telegram message body (Russian) — no preamble, no tool narration.
+**index** so the rest of the day is at least visible and clickable.
+
+**Your entire final message IS the digest.** Its first character must be `📬`.
+Everything you print is delivered to the user verbatim — a line like "Данные
+собраны, ниже дайджест" is not a note to yourself, it is the first thing he reads.
+Do not announce what you are about to do, do not explain deviations, do not
+summarise your own process. If a rule below made you choose differently, just
+choose — silently. Russian.
 
 ## Setup
 
@@ -54,6 +60,9 @@ the final Telegram message body (Russian) — no preamble, no tool narration.
   A topic with posts is never silent.
 - Then fill the remaining slots (up to 6 total) with the highest-`priority` posts left over,
   regardless of topic.
+- **One story per Tier 1.** If a post covers a story already shown in another block
+  (the same incident/release reported by a second channel), skip it and take the next
+  unique one. Six blocks about three stories is worse than six about six.
 
 **Tier 2 — index, ≤35 lines total, ≤10 per topic.**
 - Excluding posts already used in Tier 1.
