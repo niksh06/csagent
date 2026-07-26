@@ -42,3 +42,6 @@ deploy/assets/pet/dist/
 deploy/assets/pet/*.png
 deploy/assets/pet/pet-concept-*
 deploy/assets/pet/*-v2.png
+
+# browser MCP session artifacts
+.playwright-mcp/
