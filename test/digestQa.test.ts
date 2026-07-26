@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   DEFAULT_DIGEST_JOB_ID,
+  DIGEST_TG_TARGET_CHARS,
   digestNeverRan,
   evaluateDigestQa,
   formatDigestQaAlert,
@@ -186,7 +187,9 @@ test("evaluateDigestQa warns but passes when digest 3501-12000 chars", () => {
       },
     },
   });
-  const pad = "x".repeat(1200);
+  // Sized off the constant, not a literal: this test used to hardcode 3500 and
+  // silently stopped exercising the warn when the target moved to 8000.
+  const pad = "x".repeat(Math.ceil(DIGEST_TG_TARGET_CHARS / 3));
   const body = [
     "📬 TParser · день",
     "**TL;DR:** краткий итог дня для Telegram.",
@@ -203,7 +206,10 @@ test("evaluateDigestQa warns but passes when digest 3501-12000 chars", () => {
     "## Programming / devtools",
     "https://t.me/example/4",
   ].join("\n");
-  assert.ok(body.length > 3500 && body.length <= 12_000, `body len=${body.length}`);
+  assert.ok(
+    body.length > DIGEST_TG_TARGET_CHARS && body.length <= 12_000,
+    `body len=${body.length} must exceed the tg target ${DIGEST_TG_TARGET_CHARS}`
+  );
   saveDigestOutput(dir, DEFAULT_DIGEST_JOB_ID, body);
   const report = evaluateDigestQa(dir, DEFAULT_DIGEST_JOB_ID);
   assert.equal(report.ok, true);
