@@ -49,3 +49,17 @@ describe("pricing", () => {
     assert.match(formatUsd(1.235), /\$1\.24|\$1\.23/);
   });
 });
+
+describe("pricing — live model", () => {
+  it("prices the model Irida actually runs", () => {
+    // engine.model on prod is claude-opus-5. An unpriced model makes
+    // estimateCostUsd return null, so cost tracking silently goes dark —
+    // this test fails the day the running model leaves the table.
+    const r = lookupModelRates("claude-opus-5");
+    assert.ok(r, "claude-opus-5 must be in MODEL_RATES");
+    assert.equal(r.inputPerMTok, 5);
+    assert.equal(r.outputPerMTok, 25);
+    assert.equal(r.cacheReadPerMTok, 0.5);
+    assert.equal(estimateCostUsd({ inputTokens: 1_000_000 }, "claude-opus-5"), 5);
+  });
+});

@@ -9,7 +9,7 @@
  * Only the claude-agent (Anthropic) engine is priced. The cursor engine's model
  * is unknown here → `estimateCostUsd` returns null (we show usage, not $).
  */
-export const RATES_AS_OF = "2026-06-04";
+export const RATES_AS_OF = "2026-07-28";
 
 export interface ModelRates {
   /** USD per 1M input tokens. */
@@ -33,6 +33,9 @@ function rates(input: number, output: number): ModelRates {
 
 /** Per-model rates, keyed by the exact model id (aliases mapped to the same rates). */
 export const MODEL_RATES: Record<string, ModelRates> = {
+  // Opus 5 is a drop-in upgrade at Opus 4.8's price — same $5/$25.
+  // (Fast mode is billed at $10/$50, but Irida does not request it.)
+  "claude-opus-5": rates(5, 25),
   "claude-opus-4-8": rates(5, 25),
   "claude-sonnet-4-6": rates(3, 15),
   "claude-haiku-4-5": rates(1, 5),
