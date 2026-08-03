@@ -8,6 +8,7 @@ import {
   TELEGRAM_TOKEN_HELP,
   apiKeySourceLabel,
   clearAnthropicApiKey,
+  clearOpenAiApiKey,
   clearClaudeOAuthToken,
   resolveAnthropicKey,
   resolveClaudeOAuthToken,
@@ -16,6 +17,7 @@ import {
   removeClaudeOAuthTokenFromPool,
   useClaudeOAuthTokenInPool,
   saveAnthropicApiKey,
+  saveOpenAiApiKey,
   saveClaudeOAuthToken,
   clearAllStoredCredentials,
   clearStoredTelegramToken,
@@ -23,6 +25,7 @@ import {
   hasStoredCredentials,
   hasStoredTelegramToken,
   persistAnthropicApiKey,
+  persistOpenAiApiKey,
   persistClaudeOAuthToken,
   persistCursorApiKey,
   persistTelegramBotToken,
@@ -33,6 +36,7 @@ import {
   saveTelegramBotToken,
   telegramTokenSourceLabel,
   validateAnthropicApiKeyFormat,
+  validateOpenAiApiKeyFormat,
   validateClaudeOAuthTokenFormat,
   validateCursorApiKeyFormat,
   validateTelegramBotTokenFormat,
@@ -55,6 +59,9 @@ Usage:
   irida auth claude token-use <id>      make this token active
   irida auth claude token-remove <id>   drop one from the pool
   irida auth claude logout              remove all stored Claude OAuth token(s)
+  irida auth openai login --stdin       OpenAI API key (codex engine, auth=api-key)
+  irida auth openai logout              remove stored OpenAI API key
+                                        (codex auth=account needs none — run \`codex login\`)
   irida auth telegram login --stdin     Telegram bot token
   irida auth telegram login --from-env  copy TELEGRAM_BOT_TOKEN from environment
   irida auth logout                     remove stored secrets
@@ -154,6 +161,45 @@ async function cmdAuthAnthropic(args: string[], dir: string): Promise<ExitCode> 
       return EXIT.ok;
     default:
       console.error(`auth anthropic: unknown subcommand '${sub}'\n\n${AUTH_HELP}`);
+      return EXIT.usage;
+  }
+}
+
+/**
+ * `irida auth openai …` — OpenAI API key for the codex engine (auth=api-key).
+ * Account mode needs nothing here: `codex login` owns that session on disk.
+ */
+async function cmdAuthOpenAi(args: string[], dir: string): Promise<ExitCode> {
+  const [sub, ...rest] = args;
+  switch (sub) {
+    case "login": {
+      const r = await readSecretArg(rest, "OPENAI_API_KEY", "auth openai login");
+      if ("error" in r) return r.error;
+      if (pgSecretsEnabled()) await persistOpenAiApiKey(r.value, dir);
+      else saveOpenAiApiKey(r.value, dir);
+      console.log(
+        pgSecretsEnabled()
+          ? "auth: openai API key saved (postgres credential_secrets, pgcrypto)"
+          : `auth: openai API key saved to ${credentialsPath(dir)} (mode 600)`
+      );
+      return EXIT.ok;
+    }
+    case "logout": {
+      let removed = clearOpenAiApiKey(dir);
+      if (pgSecretsEnabled()) {
+        removed = (await deletePgCredentialSecret("openai_api_key")) || removed;
+      }
+      console.log(removed ? "auth: openai API key removed" : "auth: no stored openai API key");
+      return EXIT.ok;
+    }
+    case undefined:
+    case "-h":
+    case "--help":
+    case "help":
+      console.log(AUTH_HELP);
+      return EXIT.ok;
+    default:
+      console.error(`auth openai: unknown subcommand '${sub}'\n\n${AUTH_HELP}`);
       return EXIT.usage;
   }
 }
@@ -365,6 +411,9 @@ export async function cmdAuth(args: string[], dir: string = process.cwd()): Prom
   if (args[0] === "claude") {
     return cmdAuthClaude(args.slice(1), dir);
   }
+  if (args[0] === "openai" || args[0] === "codex") {
+    return cmdAuthOpenAi(args.slice(1), dir);
+  }
   const [sub, ...rest] = args;
   switch (sub) {
     case "login": {
@@ -500,6 +549,9 @@ export async function cmdAuth(args: string[], dir: string = process.cwd()): Prom
         case "claude_code_oauth_token":
           await persistClaudeOAuthToken(entry.value, dir);
           break;
+        case "openai_api_key":
+          await persistOpenAiApiKey(entry.value, dir);
+          break;
       }
       console.log(`auth: restored ${entry.name} from history #${id} (previous value archived)`);
       return EXIT.ok;
@@ -526,5 +578,7 @@ function validateSecretFormat(name: CredentialSecretName, value: string): boolea
       return validateClaudeOAuthTokenFormat(value).ok;
     case "telegram_bot_token":
       return validateTelegramBotTokenFormat(value).ok;
+    case "openai_api_key":
+      return validateOpenAiApiKeyFormat(value).ok;
   }
 }

@@ -4,8 +4,16 @@
 import { accessSync, constants, existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { iridaHome } from "./env.js";
-import { CONFIG_FILE, ConfigError, loadConfig, resolveMemoryRoot, validateMcpServers } from "./config.js";
+import {
+  CONFIG_FILE,
+  ConfigError,
+  loadConfig,
+  resolveEngineAuth,
+  resolveMemoryRoot,
+  validateMcpServers,
+} from "./config.js";
 import { browserMcpEnabled, resolveMcpServers } from "./mcpServers.js";
+import { operatorCodexAuthPath } from "./engines/codexSdk.js";
 import { resolveBrowserRoot } from "./mcp/browserContext.js";
 import {
   apiKeySourceLabel,
@@ -13,11 +21,14 @@ import {
   pgSecretsEnabled,
   resolveApiKey,
   resolveAnthropicKey,
+  resolveOpenAiKey,
+  codexAccountAvailable,
   resolveClaudeOAuthToken,
   resolveClaudeOAuthTokenPool,
   resolveTelegramBotToken,
   telegramTokenSourceLabel,
   validateAnthropicApiKeyFormat,
+  validateOpenAiApiKeyFormat,
   validateClaudeOAuthTokenFormat,
   validateCursorApiKeyFormat,
   validateTelegramBotTokenFormat,
@@ -83,15 +94,36 @@ export function gatherDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   try {
     const c0 = loadConfig(dir);
     engineProvider = c0.engine.provider;
-    engineAuth = c0.engine.auth ?? "api-key";
+    engineAuth = resolveEngineAuth(c0.engine);
   } catch {
     /* config errors surface in the config check below */
   }
   checks.push({
     name: "engine",
     ok: true,
-    detail: engineProvider === "claude-agent" ? `claude-agent (auth=${engineAuth})` : "cursor",
+    detail:
+      engineProvider === "cursor" ? "cursor" : `${engineProvider} (auth=${engineAuth})`,
   });
+
+  if (engineProvider === "codex" && engineAuth === "account") {
+    // The subscription session the CLI keeps on disk; Irida's isolated
+    // CODEX_HOME symlinks this exact file so both share one refresher.
+    const present = codexAccountAvailable();
+    checks.push({
+      name: "codex session",
+      ok: present,
+      detail: present ? `set (${operatorCodexAuthPath()})` : "missing — no `codex login` session",
+      fix: "codex login",
+    });
+  } else if (engineProvider === "codex") {
+    const o = resolveOpenAiKey(dir);
+    checks.push({
+      name: "OPENAI_API_KEY",
+      ok: o.key.length > 0,
+      detail: o.source === "none" ? "missing" : `set (${o.source})`,
+      fix: 'printf %s "sk-..." | irida auth openai login --stdin',
+    });
+  }
 
   if (engineProvider === "claude-agent" && engineAuth === "account") {
     const t = resolveClaudeOAuthToken(dir);
@@ -311,6 +343,18 @@ function gatherDoctorSecretFormatChecks(dir: string): DoctorCheck[] {
       detail: fmt.ok
         ? `ok (${oauth.key.length} chars, ${oauth.source})`
         : `${fmt.detail} — ${oauth.source}`,
+    });
+  }
+  // codex engine, auth=api-key (I-144). Account mode stores no secret here.
+  const openai = resolveOpenAiKey(dir);
+  if (openai.key) {
+    const fmt = validateOpenAiApiKeyFormat(openai.key);
+    checks.push({
+      name: "OPENAI_API_KEY format",
+      ok: fmt.ok,
+      detail: fmt.ok
+        ? `ok (${openai.key.length} chars, ${openai.source})`
+        : `${fmt.detail} — ${openai.source}`,
     });
   }
   return checks;

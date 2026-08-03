@@ -56,6 +56,7 @@ export interface CredentialsFile {
   telegram_bot_token?: string;
   anthropic_api_key?: string;
   claude_code_oauth_token?: string;
+  openai_api_key?: string;
 }
 
 export const API_KEY_HELP =
@@ -63,6 +64,12 @@ export const API_KEY_HELP =
 
 export const ANTHROPIC_API_KEY_HELP =
   "claude-agent engine (auth=api-key): set ANTHROPIC_API_KEY in the environment";
+
+export const OPENAI_API_KEY_HELP =
+  "codex engine (auth=api-key): set OPENAI_API_KEY in the environment or run: irida auth openai login --stdin";
+
+export const CODEX_ACCOUNT_HELP =
+  "codex engine (auth=account): connect your ChatGPT account — run `codex login` (the CLI stores the session in ~/.codex/auth.json)";
 
 export const CLAUDE_OAUTH_HELP =
   "claude-agent engine (auth=account): connect your Claude account — run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN, or run `claude login` (the SDK reads ~/.claude/.credentials.json)";
@@ -111,6 +118,25 @@ export function validateCursorApiKeyFormat(key: string): SecretFormatCheck {
   return {
     ok: false,
     detail: `unexpected shape (${k.length} chars) — expected crsr_/cursor_ prefix or length ≥40`,
+  };
+}
+
+/** OpenAI API keys are `sk-…` / `sk-proj-…`; stay loose beyond a corruption floor. */
+export function validateOpenAiApiKeyFormat(key: string): SecretFormatCheck {
+  const k = key.trim();
+  if (k.length < 20) {
+    return {
+      ok: false,
+      detail: `too short (${k.length} chars) — likely corrupt decryption or wrong secret`,
+    };
+  }
+  const ws = whitespaceShapeIssue(k);
+  if (ws) return ws;
+  if (k.startsWith("sk-")) return { ok: true, detail: "ok" };
+  if (k.length >= 40) return { ok: true, detail: "ok" };
+  return {
+    ok: false,
+    detail: `unexpected shape (${k.length} chars) — expected sk-… prefix or length ≥40`,
   };
 }
 
@@ -208,6 +234,9 @@ function readCredentialsFileFromDisk(dir: string = process.cwd()): CredentialsFi
     if (typeof parsed.claude_code_oauth_token === "string" && parsed.claude_code_oauth_token.trim()) {
       out.claude_code_oauth_token = parsed.claude_code_oauth_token.trim();
     }
+    if (typeof parsed.openai_api_key === "string" && parsed.openai_api_key.trim()) {
+      out.openai_api_key = parsed.openai_api_key.trim();
+    }
     return out;
   } catch {
     return { version: CREDENTIALS_VERSION };
@@ -236,12 +265,14 @@ function writeCredentialsFile(dir: string, data: CredentialsFile): void {
   if (data.telegram_bot_token?.trim()) body.telegram_bot_token = data.telegram_bot_token.trim();
   if (data.anthropic_api_key?.trim()) body.anthropic_api_key = data.anthropic_api_key.trim();
   if (data.claude_code_oauth_token?.trim()) body.claude_code_oauth_token = data.claude_code_oauth_token.trim();
+  if (data.openai_api_key?.trim()) body.openai_api_key = data.openai_api_key.trim();
 
   if (
     !body.cursor_api_key &&
     !body.telegram_bot_token &&
     !body.anthropic_api_key &&
     !body.claude_code_oauth_token &&
+    !body.openai_api_key &&
     body.storage !== "pg"
   ) {
     if (existsSync(path)) unlinkSync(path);
@@ -281,6 +312,8 @@ function checkSecretFormat(name: CredentialSecretName, value: string): SecretFor
       return validateClaudeOAuthTokenFormat(value);
     case "telegram_bot_token":
       return validateTelegramBotTokenFormat(value);
+    case "openai_api_key":
+      return validateOpenAiApiKeyFormat(value);
   }
 }
 
@@ -289,6 +322,7 @@ const SECRET_RESAVE_HINT: Record<CredentialSecretName, string> = {
   telegram_bot_token: "irida auth telegram login --stdin",
   anthropic_api_key: "irida auth anthropic login --stdin",
   claude_code_oauth_token: "irida auth claude token --stdin",
+  openai_api_key: "irida auth openai login --stdin",
 };
 
 /**
@@ -438,6 +472,40 @@ export function resolveAnthropicKey(dir: string = process.cwd()): ResolvedApiKey
 }
 
 /**
+ * Resolve the OpenAI API key for the codex engine in auth=api-key mode (I-144).
+ * Env `OPENAI_API_KEY` overrides postgres (pgcrypto) and the plaintext
+ * credentials.json field — same precedence chain as the other secrets. Not
+ * consulted in account mode, where the `codex login` session is the credential.
+ */
+export function resolveOpenAiKey(dir: string = process.cwd()): ResolvedApiKey {
+  const fromEnv = (process.env.OPENAI_API_KEY ?? "").trim();
+  if (fromEnv) return { key: fromEnv, source: "env" };
+  const fromPg = guardResolvedSecret("openai_api_key", pgCachedSecret("openai_api_key"), "pg");
+  if (fromPg) return { key: fromPg, source: "pg" };
+  const fromFile = guardResolvedSecret(
+    "openai_api_key",
+    readCredentialsFileFromDisk(dir).openai_api_key ?? "",
+    "file"
+  );
+  if (fromFile) return { key: fromFile, source: "file" };
+  return { key: "", source: "none" };
+}
+
+/**
+ * Whether the codex engine could run in ACCOUNT mode right now: a `codex login`
+ * session on disk. Irida's adapter runs the CLI under its own CODEX_HOME and
+ * symlinks this exact file in, so the operator's session is the single source
+ * of truth (and the single refresher of its rotating token).
+ */
+export function codexAccountAvailable(): boolean {
+  try {
+    return existsSync(join(homedir(), ".codex", "auth.json"));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve the ACTIVE Claude account OAuth token for the claude-agent engine
  * (auth=account, I-100). Env `CLAUDE_CODE_OAUTH_TOKEN` (from `claude
  * setup-token`) overrides everything else. Otherwise resolves the pool
@@ -492,7 +560,11 @@ export function resolveTelegramBotToken(
 export function hasPlaintextCredentialsOnDisk(dir: string = process.cwd()): boolean {
   const file = readCredentialsFileFromDisk(dir);
   return Boolean(
-    file.cursor_api_key || file.telegram_bot_token || file.anthropic_api_key || file.claude_code_oauth_token
+    file.cursor_api_key ||
+      file.telegram_bot_token ||
+      file.anthropic_api_key ||
+      file.claude_code_oauth_token ||
+      file.openai_api_key
   );
 }
 
@@ -544,6 +616,31 @@ export function clearAnthropicApiKey(dir: string = process.cwd()): boolean {
   if (!existing.anthropic_api_key) return false;
   const next = { ...existing };
   delete next.anthropic_api_key;
+  writeCredentialsFile(dir, next);
+  return true;
+}
+
+/** Persist the OpenAI API key (codex engine auth=api-key, file storage). Preserves other secrets. */
+export function saveOpenAiApiKey(key: string, dir: string = process.cwd()): void {
+  const v = key.trim();
+  if (!v) throw new Error("OpenAI API key must be a non-empty string");
+  if (pgSecretsEnabled()) {
+    throw new Error("saveOpenAiApiKey: use persistOpenAiApiKey when the secrets key is set");
+  }
+  const existing = readCredentialsFileFromDisk(dir);
+  writeCredentialsFile(dir, { ...existing, openai_api_key: v });
+}
+
+/** Persist the OpenAI API key to postgres (pgcrypto) or file — parity with the other secrets. */
+export async function persistOpenAiApiKey(key: string, dir: string = process.cwd()): Promise<void> {
+  await persistSecret("openai_api_key", key, dir);
+}
+
+export function clearOpenAiApiKey(dir: string = process.cwd()): boolean {
+  const existing = readCredentialsFileFromDisk(dir);
+  if (!existing.openai_api_key) return false;
+  const next = { ...existing };
+  delete next.openai_api_key;
   writeCredentialsFile(dir, next);
   return true;
 }

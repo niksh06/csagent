@@ -18,6 +18,7 @@ export const CREDENTIAL_SECRET_NAMES = [
   "telegram_bot_token",
   "anthropic_api_key",
   "claude_code_oauth_token",
+  "openai_api_key",
 ] as const;
 export type CredentialSecretName = (typeof CREDENTIAL_SECRET_NAMES)[number];
 
