@@ -8,7 +8,8 @@ import {
   applyEngineOverride,
   resolveDenyDestructive,
   resolveSanitizeInput,
-  DEFAULT_CLAUDE_AGENT_MODEL,
+  resolveEngineAuth,
+  resolveEngineModel,
   type AgentConfig,
   type EngineProvider,
   type EngineAuth,
@@ -64,8 +65,10 @@ import { cogitBriefBlocks } from "./cogitBrief.js";
 import {
   API_KEY_HELP,
   ANTHROPIC_API_KEY_HELP,
+  OPENAI_API_KEY_HELP,
   resolveApiKey,
   resolveAnthropicKey,
+  resolveOpenAiKey,
   resolveClaudeOAuthToken,
   markClaudeOAuthTokenInvalid,
 } from "./credentials.js";
@@ -191,8 +194,19 @@ async function resolveSdk(
     const { createClaudeAgentSdk } = await import("./engines/claudeAgentSdk.js");
     return createClaudeAgentSdk({ authMode, toolPolicy: { denyDestructive, sanitizeInput } }) as unknown as ChatSdk;
   }
+  if (provider === "codex") {
+    const { createCodexSdk } = await import("./engines/codexSdk.js");
+    return createCodexSdk({ authMode, toolPolicy: { denyDestructive, sanitizeInput } }) as unknown as ChatSdk;
+  }
   const mod = await import("@cursor/sdk");
   return mod.Agent as unknown as ChatSdk;
+}
+
+/** npm package behind each engine, for a "cannot load" diagnostic. */
+function enginePackage(provider: EngineProvider): string {
+  if (provider === "claude-agent") return "@anthropic-ai/claude-agent-sdk";
+  if (provider === "codex") return "@openai/codex-sdk";
+  return "@cursor/sdk";
 }
 
 async function resolveSessionTitle(store: IStore, sessionId: string, userMsg: string): Promise<string> {
@@ -229,12 +243,20 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
   }
 
   const provider = cfg.engine.provider;
-  const authMode: EngineAuth = provider === "claude-agent" ? (cfg.engine.auth ?? "api-key") : "api-key";
+  const authMode: EngineAuth = resolveEngineAuth(cfg.engine);
 
   let apiKey = "";
   if (provider === "cursor") {
     apiKey = resolveApiKey(dir).key;
     if (!apiKey) return { ok: false, code: EXIT.config, message: API_KEY_HELP };
+  } else if (provider === "codex") {
+    if (authMode === "api-key") {
+      apiKey = resolveOpenAiKey(dir).key;
+      if (!apiKey) return { ok: false, code: EXIT.config, message: OPENAI_API_KEY_HELP };
+    }
+    // Account mode carries no secret: the CLI reads the `codex login` session.
+    // A missing session surfaces as an auth-classified run error, not here —
+    // matching how claude-agent account mode tolerates an empty token.
   } else if (authMode === "account") {
     // Account mode tolerates an empty token (falls back to the `claude login` session).
     apiKey = resolveClaudeOAuthToken(dir).key;
@@ -243,9 +265,7 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
     if (!apiKey) return { ok: false, code: EXIT.config, message: ANTHROPIC_API_KEY_HELP };
   }
 
-  const defaultModel =
-    provider === "claude-agent" ? (cfg.engine.model ?? DEFAULT_CLAUDE_AGENT_MODEL) : cfg.model;
-  const activeModel = (opts.model ?? defaultModel).trim();
+  const activeModel = (opts.model ?? resolveEngineModel(cfg)).trim();
   if (!activeModel) {
     return { ok: false, code: EXIT.config, message: "model must be a non-empty string" };
   }
@@ -342,8 +362,11 @@ export async function openChatSession(opts: ChatSessionOptions = {}): Promise<Op
     sdk = await resolveSdk(provider, authMode, denyDestructive, opts.sdk, resolveSanitizeInput(cfg.engine));
   } catch (e) {
     await store.close();
-    const pkg = provider === "claude-agent" ? "@anthropic-ai/claude-agent-sdk" : "@cursor/sdk";
-    return { ok: false, code: EXIT.software, message: `cannot load ${pkg}: ` + redact((e as Error).message) };
+    return {
+      ok: false,
+      code: EXIT.software,
+      message: `cannot load ${enginePackage(provider)}: ` + redact((e as Error).message),
+    };
   }
 
   let agent: AgentLike;

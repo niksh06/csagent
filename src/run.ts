@@ -9,7 +9,8 @@ import {
   applyEngineOverride,
   resolveDenyDestructive,
   resolveSanitizeInput,
-  DEFAULT_CLAUDE_AGENT_MODEL,
+  resolveEngineAuth,
+  resolveEngineModel,
   type EngineProvider,
   type EngineAuth,
 } from "./config.js";
@@ -30,8 +31,10 @@ import { EXIT, type ExitCode } from "./exit.js";
 import {
   API_KEY_HELP,
   ANTHROPIC_API_KEY_HELP,
+  OPENAI_API_KEY_HELP,
   resolveApiKey,
   resolveAnthropicKey,
+  resolveOpenAiKey,
   resolveClaudeOAuthToken,
   markClaudeOAuthTokenInvalid,
 } from "./credentials.js";
@@ -97,6 +100,10 @@ async function resolveSdk(
     const { createClaudeAgentSdk } = await import("./engines/claudeAgentSdk.js");
     return createClaudeAgentSdk({ authMode, toolPolicy: { denyDestructive, sanitizeInput, allowWriteRoots, effort } });
   }
+  if (provider === "codex") {
+    const { createCodexSdk } = await import("./engines/codexSdk.js");
+    return createCodexSdk({ authMode, toolPolicy: { denyDestructive, sanitizeInput, allowWriteRoots, effort } });
+  }
   const mod = await import("@cursor/sdk");
   return mod.Agent as unknown as SdkLike;
 }
@@ -120,7 +127,7 @@ export async function runPrompt(prompt: string, opts: RunOptions = {}): Promise<
   }
 
   const provider = cfg.engine.provider;
-  const authMode: EngineAuth = provider === "claude-agent" ? (cfg.engine.auth ?? "api-key") : "api-key";
+  const authMode: EngineAuth = resolveEngineAuth(cfg.engine);
 
   let apiKey = "";
   if (provider === "cursor") {
@@ -130,6 +137,15 @@ export async function runPrompt(prompt: string, opts: RunOptions = {}): Promise<
       // Programmatic callers (delegate) surface `text` — not just the exit code.
       return { exitCode: EXIT.config, text: API_KEY_HELP };
     }
+  } else if (provider === "codex") {
+    if (authMode === "api-key") {
+      apiKey = resolveOpenAiKey(dir).key;
+      if (!apiKey) {
+        if (!quiet) console.error(`run: ${OPENAI_API_KEY_HELP}`);
+        return { exitCode: EXIT.config, text: OPENAI_API_KEY_HELP };
+      }
+    }
+    // Account mode: no secret here — the CLI uses the `codex login` session.
   } else if (authMode === "account") {
     // Account mode: an empty token is fine — the Agent SDK falls back to an existing
     // `claude login` session (~/.claude/.credentials.json). Don't hard-fail here.
@@ -143,9 +159,7 @@ export async function runPrompt(prompt: string, opts: RunOptions = {}): Promise<
   }
 
   const agentCwd = opts.cwd ?? cfg.cwd;
-  const effectiveModel =
-    opts.model?.trim() ||
-    (provider === "claude-agent" ? (cfg.engine.model ?? DEFAULT_CLAUDE_AGENT_MODEL) : cfg.model);
+  const effectiveModel = opts.model?.trim() || resolveEngineModel(cfg);
   if (cfg.runtime === "cloud" && !cfg.safety.allowCloud) {
     if (!quiet) console.error("run: cloud runtime requires safety.allowCloud=true (MVP is local-first)");
     return { exitCode: EXIT.config, text: "" };
@@ -214,7 +228,12 @@ export async function runPrompt(prompt: string, opts: RunOptions = {}): Promise<
     const denyDestructive = resolveDenyDestructive(cfg.engine, runChannel);
     const sanitizeInput = resolveSanitizeInput(cfg.engine);
     const sdk = await resolveSdk(provider, authMode, denyDestructive, opts.sdk, sanitizeInput, opts.allowWriteRoots, opts.effort).catch((e) => {
-      const pkg = provider === "claude-agent" ? "@anthropic-ai/claude-agent-sdk" : "@cursor/sdk";
+      const pkg =
+        provider === "claude-agent"
+          ? "@anthropic-ai/claude-agent-sdk"
+          : provider === "codex"
+          ? "@openai/codex-sdk"
+          : "@cursor/sdk";
       throw new StartupError(`cannot load ${pkg}: ` + (e as Error).message);
     });
     // One-shot overload retry (H-10, parity with I-133 in chat): a transient

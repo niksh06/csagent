@@ -28,7 +28,6 @@ export const SLASH_REGISTRY: SlashRegistryEntry[] = [
   { cmd: "memory", desc: "List durable memories", descGateway: "Поиск в памяти", args: "<запрос>", surfaces: ["tui", "gateway"] },
   { cmd: "doctor", desc: "Environment checks", descGateway: "Краткая проверка окружения", surfaces: ["tui", "gateway"] },
   { cmd: "tools", desc: "Tool / MCP activity log", surfaces: ["tui"] },
-  { cmd: "model", desc: "Pick SDK model", surfaces: ["tui"] },
   { cmd: "mcp", desc: "Show MCP server config", surfaces: ["tui"] },
   { cmd: "copy", desc: "Copy last reply (OSC52)", surfaces: ["tui"] },
   { cmd: "find", desc: "Search transcript (repeat = older match)", args: "<text>", surfaces: ["tui"] },
@@ -48,7 +47,7 @@ export const SLASH_REGISTRY: SlashRegistryEntry[] = [
   { cmd: "cancel", desc: "Abandon pending question / a follow-up by id", descGateway: "Отменить вопрос агента или отложенную задачу (/cancel <fu_id>)", args: "[fu_id]", surfaces: ["gateway"] },
   { cmd: "stop", desc: "Discard current turn + clear queue", descGateway: "Прервать: отбросить текущий ответ и очистить очередь", surfaces: ["gateway"] },
   { cmd: "followups", desc: "List scheduled deferred follow-ups", descGateway: "Отложенные задачи агента (defer_followup)", surfaces: ["gateway"] },
-  { cmd: "engine", desc: "Pick SDK engine (new session)", descGateway: "Движок SDK: cursor | claude (sticky, новая сессия)", args: "[cursor|claude|off]", surfaces: ["tui", "gateway"] },
+  { cmd: "engine", desc: "Pick SDK engine (new session)", descGateway: "Движок SDK: cursor | claude | codex (sticky, новая сессия)", args: "[cursor|claude|codex|off]", surfaces: ["tui", "gateway"] },
 ];
 
 export function slashEntriesForSurface(surface: SlashSurface): SlashRegistryEntry[] {

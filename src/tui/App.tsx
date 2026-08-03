@@ -60,7 +60,13 @@ import { resolveAgentLogger } from "../agentLog.js";
 import { resolve as resolvePath } from "node:path";
 import { loadConfig } from "../config.js";
 import { parseEngineArg } from "../gatewayEngineStore.js";
-import { resolveApiKey, resolveAnthropicKey, claudeAccountAvailable } from "../credentials.js";
+import {
+  resolveApiKey,
+  resolveAnthropicKey,
+  resolveOpenAiKey,
+  claudeAccountAvailable,
+  codexAccountAvailable,
+} from "../credentials.js";
 import { indexOfLastAssistant, indexOfStreamingAssistant } from "./streamingTarget.js";
 import {
   formatToolProgressLine,
@@ -156,7 +162,12 @@ export function App(props: TuiOptions) {
     let engineLabel = "the agent";
     try {
       const provider = props.engine ?? loadConfig(dir).engine?.provider ?? "cursor";
-      engineLabel = provider === "claude-agent" ? "Claude Agent SDK" : "Cursor SDK";
+      engineLabel =
+        provider === "claude-agent"
+          ? "Claude Agent SDK"
+          : provider === "codex"
+          ? "Codex"
+          : "Cursor SDK";
     } catch {
       /* default label */
     }
@@ -783,7 +794,7 @@ export function App(props: TuiOptions) {
           if (!slash.engine) {
             pushMessage({
               role: "system",
-              text: `engine: ${current}${engineOverrideRef.current ? " (override)" : ""} · switch: /engine cursor | claude [account|api-key] · reset: /engine off`,
+              text: `engine: ${current}${engineOverrideRef.current ? " (override)" : ""} · switch: /engine cursor | claude [account|api-key] | codex · reset: /engine off`,
             });
             return;
           }
@@ -799,7 +810,7 @@ export function App(props: TuiOptions) {
             if (!parsed) {
               pushMessage({
                 role: "error",
-                text: `unknown engine «${slash.engine}» — use cursor | claude (or off)`,
+                text: `unknown engine «${slash.engine}» — use cursor | claude | codex (or off)`,
               });
               return;
             }
@@ -837,6 +848,33 @@ export function App(props: TuiOptions) {
               }
               if (decision.note) pushMessage({ role: "system", text: decision.note });
               nextAuth = decision.auth;
+            }
+            if (parsed === "codex") {
+              // Account (a `codex login` session) is the codex default; an
+              // api-key hint needs the key to actually be there.
+              const configAuth = (() => {
+                try {
+                  return loadConfig(dir).engine?.auth;
+                } catch {
+                  return undefined;
+                }
+              })();
+              const auth = authTok ?? props.auth ?? configAuth ?? "account";
+              if (auth === "api-key" && !resolveOpenAiKey(dir).key) {
+                pushMessage({
+                  role: "error",
+                  text: "OPENAI_API_KEY is not set — run `irida auth openai login --stdin`, or use `/engine codex account`",
+                });
+                return;
+              }
+              if (auth === "account" && !codexAccountAvailable()) {
+                pushMessage({
+                  role: "error",
+                  text: "no codex session — run `codex login` first",
+                });
+                return;
+              }
+              nextAuth = auth;
             }
             nextOverride = parsed;
           }

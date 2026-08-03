@@ -8,6 +8,13 @@
  *
  * Only the claude-agent (Anthropic) engine is priced. The cursor engine's model
  * is unknown here → `estimateCostUsd` returns null (we show usage, not $).
+ *
+ * Codex models are deliberately absent too. Its default auth is the ChatGPT
+ * subscription, which is not billed per token, so a dollar figure would be
+ * fiction rather than a bill; and no verified per-model API rates for the codex
+ * ids are on hand — a guessed number in a cost report is worse than no number.
+ * Token counts still flow (the adapter maps `turn.completed.usage`), so /usage
+ * reports codex runs in tokens, and only the $ suffix is omitted.
  */
 export const RATES_AS_OF = "2026-07-28";
 

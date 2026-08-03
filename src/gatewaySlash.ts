@@ -9,14 +9,19 @@ import { loadGatewayPeers, peerKey } from "./gatewayPeers.js";
 import { tryApprovePairing } from "./gatewayPairing.js";
 import { backgroundPauseState, setBackgroundPaused } from "./backgroundPause.js";
 import { createMemoryStore } from "./memoryStore.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, resolveEngineAuth } from "./config.js";
 import { loadRunMetrics, formatRunMetrics, loadSessionUsage, formatSessionUsage } from "./runMetrics.js";
 import { runLogEnabled } from "./runLog.js";
 import { loadProposals } from "./evolutionCycle.js";
 import { loadSkillLedger, rollbackAgentSkill } from "./skillApply.js";
 import { getChatMode, setChatMode, clearChatMode } from "./gatewayModeStore.js";
 import { clearChatEngine, getChatEngine, parseEngineArg, setChatEngine } from "./gatewayEngineStore.js";
-import { resolveApiKey, resolveAnthropicKey } from "./credentials.js";
+import {
+  resolveApiKey,
+  resolveAnthropicKey,
+  resolveOpenAiKey,
+  codexAccountAvailable,
+} from "./credentials.js";
 import { clearPendingQuestion } from "./gatewayPendingQuestionStore.js";
 import { listFollowups, clearFollowup, getFollowup } from "./gatewayFollowupStore.js";
 import { parseModeArg, TURN_MODES } from "./preTurn.js";
@@ -143,8 +148,9 @@ export async function handleGatewaySlash(
       ];
       const sid = loadGatewayPeers(ctx.dir).peers[peerKey(ctx.adapter, ctx.chatId)];
       if (sid) lines.push(formatSessionUsage(loadSessionUsage(ctx.dir, cfg.stateDir, sid)));
-      const account =
-        cfg.engine.provider === "claude-agent" && (cfg.engine.auth ?? "api-key") === "account";
+      // Subscription auth (claude account / codex login) is not per-token billed:
+      // the $ figure is what the same usage WOULD cost on the API.
+      const account = cfg.engine.provider !== "cursor" && resolveEngineAuth(cfg.engine) === "account";
       if (account && m.costUsd != null) lines.push("(account/subscription — $ is metered-equivalent, not billed)");
       return lines.join("\n");
     }
@@ -228,7 +234,7 @@ export async function handleGatewaySlash(
         const active = sticky ?? cfgDefault;
         return [
           `engine: **${active}**${sticky ? " (sticky для чата)" : " (из конфига)"}`,
-          `Сменить: /engine cursor | claude · сброс к конфигу: /engine off`,
+          `Сменить: /engine cursor | claude | codex · сброс к конфигу: /engine off`,
           `Смена движка всегда открывает новую сессию.`,
         ].join("\n");
       }
@@ -239,7 +245,7 @@ export async function handleGatewaySlash(
         return `движок → **${cfgDefault}** (из конфига). Сессия сброшена.`;
       }
       const engine = parseEngineArg(arg);
-      if (!engine) return `неизвестный движок «${arg}». Варианты: cursor | claude (или off)`;
+      if (!engine) return `неизвестный движок «${arg}». Варианты: cursor | claude | codex (или off)`;
       const current = getChatEngine(ctx.dir, ctx.adapter, ctx.chatId) ?? cfgDefault;
       if (engine === current) {
         return `движок уже **${engine}** — ничего не меняю. (Сбросить сессию: /new)`;
@@ -254,6 +260,15 @@ export async function handleGatewaySlash(
         const auth = loadConfig(ctx.dir).engine.auth ?? "api-key";
         if (auth === "api-key" && !resolveAnthropicKey(ctx.dir).key) {
           return "не переключаю: ANTHROPIC_API_KEY не найден (engine.auth=api-key) — задай ключ или поставь engine.auth=account (claude login)";
+        }
+      }
+      if (engine === "codex") {
+        const auth = resolveEngineAuth({ ...loadConfig(ctx.dir).engine, provider: "codex" });
+        if (auth === "api-key" && !resolveOpenAiKey(ctx.dir).key) {
+          return "не переключаю: OPENAI_API_KEY не найден (engine.auth=api-key) — задай ключ или поставь engine.auth=account (codex login)";
+        }
+        if (auth === "account" && !codexAccountAvailable()) {
+          return "не переключаю: нет сессии codex — сначала выполни `codex login`";
         }
       }
       setChatEngine(ctx.dir, ctx.adapter, ctx.chatId, engine);
