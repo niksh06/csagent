@@ -24,7 +24,9 @@ import {
   sendAgentTurn,
 } from "../src/host.js";
 import {
+  applyEngineOverride,
   DEFAULT_CODEX_MODEL,
+  defaults,
   normalizeEngineProvider,
   resolveEngineAuth,
 } from "../src/config.js";
@@ -465,6 +467,27 @@ test("codex defaults to account auth, claude-agent to api-key", () => {
   assert.equal(resolveEngineAuth({ provider: "codex", auth: "api-key" }), "api-key");
   assert.equal(resolveEngineAuth({ provider: "claude-agent" }), "api-key");
   assert.equal(resolveEngineAuth({ provider: "cursor" }), "api-key");
+});
+
+test("switching engines drops the previous engine's model", () => {
+  // Prod runs claude-agent with engine.model=claude-opus-5. Carrying that into a
+  // sticky `/engine codex` is fatal, not cosmetic: the CLI returns HTTP 400
+  // ("not supported when using Codex with a ChatGPT account") on every message.
+  const base = {
+    ...defaults("/tmp"),
+    engine: { provider: "claude-agent" as const, auth: "account" as const, model: "claude-opus-5" },
+  };
+  const switched = applyEngineOverride(base, "codex");
+  assert.equal(switched.engine.provider, "codex");
+  assert.equal(switched.engine.model, undefined);
+  // Auth carries over — it is engine-independent — and the original is untouched.
+  assert.equal(switched.engine.auth, "account");
+  assert.equal(base.engine.model, "claude-opus-5");
+
+  // Same engine, different auth: the model is still meaningful, so it stays.
+  const sameEngine = applyEngineOverride(base, "claude-agent", "api-key");
+  assert.equal(sameEngine.engine.model, "claude-opus-5");
+  assert.equal(applyEngineOverride(base, undefined, "api-key").engine.model, "claude-opus-5");
 });
 
 test("the default codex model is Irida's own, not the operator's config", () => {

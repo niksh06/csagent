@@ -351,6 +351,15 @@ export function applyEngineOverride(cfg: AgentConfig, provider?: string, auth?: 
     if (!normalized) {
       throw new ConfigError(`--engine must be ${ENGINE_CHOICES} (got '${provider}')`);
     }
+    if (normalized !== engine.provider) {
+      // `engine.model` names a model of the CONFIGURED provider, so it stops
+      // meaning anything the moment the engine changes — and carrying it over is
+      // fatal, not merely wrong: Codex answers a Claude id with HTTP 400 ("not
+      // supported when using Codex with a ChatGPT account"), so a sticky
+      // `/engine codex` on a claude-agent config would switch cleanly and then
+      // fail EVERY following message. Drop it; the new provider's default applies.
+      delete engine.model;
+    }
     engine.provider = normalized;
   }
   if (auth) {
