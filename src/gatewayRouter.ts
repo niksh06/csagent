@@ -15,6 +15,7 @@ import { loadLastDigestContext } from "./digestQa.js";
 import { handleGatewaySlash, isGatewaySlashCommand } from "./gatewaySlash.js";
 import { getChatMode, applyChatModePrefix } from "./gatewayModeStore.js";
 import { getChatEngine } from "./gatewayEngineStore.js";
+import { getChatModel } from "./gatewayModelStore.js";
 import { getPendingQuestion, clearPendingQuestion } from "./gatewayPendingQuestionStore.js";
 import { loadGatewayConfig, type GatewayConfig } from "./gatewayConfig.js";
 import { defaultServiceLogSink } from "./serviceLog.js";
@@ -113,6 +114,20 @@ export class GatewaySessionRouter {
     return cancelled || (!session && inFlight);
   }
 
+  /**
+   * Drop the cached SDK handle but KEEP the peer→session mapping (I-174). The
+   * next message resumes the same irida session, picking up settings that are
+   * read at open time (model) without costing the user their context — unlike
+   * resetPeer, which is for changes a live session cannot survive (engine).
+   */
+  async reopenPeer(chatId: string): Promise<void> {
+    const key = peerKey(this.adapter, chatId);
+    const cached = this.active.get(key);
+    if (!cached) return;
+    await cached.close();
+    this.active.delete(key);
+  }
+
   /** Drop cached SDK session for a peer; next inbound creates a fresh sess_. */
   async resetPeer(chatId: string): Promise<string | null> {
     const key = peerKey(this.adapter, chatId);
@@ -148,6 +163,8 @@ export class GatewaySessionRouter {
     const resumeId = this.peers.peers[key];
     // Sticky per-chat engine (I-143) overrides agent.config.json's provider.
     const chatEngine = getChatEngine(this.dir, this.adapter, chatId);
+    // Sticky per-chat model (I-174) overrides the config default for this peer.
+    const chatModel = getChatModel(this.dir, this.adapter, chatId);
     const opened = await openChatSession({
       dir: this.dir,
       sdk: this.sdk,
@@ -158,6 +175,7 @@ export class GatewaySessionRouter {
       channel: this.adapter as SessionChannel,
       gatewayPeer: { adapter: this.adapter, chatId },
       engine: chatEngine,
+      ...(chatModel ? { model: chatModel } : {}),
       onLog: this.onLog,
       onStoreDegraded: (label) => {
         // Store layers fail soft so a turn survives an outage (I-137) — which also
@@ -241,6 +259,7 @@ export class GatewaySessionRouter {
           yesIUnderstand: this.yesIUnderstand,
           getSession: () => this.getOrCreateSession(chatId),
           resetSession: () => this.resetPeer(chatId),
+          reopenSession: () => this.reopenPeer(chatId),
         });
         if (slashReply) return { reply: slashReply };
       }

@@ -9,7 +9,14 @@ import { loadGatewayPeers, peerKey } from "./gatewayPeers.js";
 import { tryApprovePairing } from "./gatewayPairing.js";
 import { backgroundPauseState, setBackgroundPaused } from "./backgroundPause.js";
 import { createMemoryStore } from "./memoryStore.js";
-import { loadConfig, resolveEngineAuth } from "./config.js";
+import { loadConfig, resolveEngineAuth, resolveEngineModel } from "./config.js";
+import {
+  clearChatModel,
+  getChatModel,
+  modelConflict,
+  setChatModel,
+  suggestedModels,
+} from "./gatewayModelStore.js";
 import { loadRunMetrics, formatRunMetrics, loadSessionUsage, formatSessionUsage } from "./runMetrics.js";
 import { runLogEnabled } from "./runLog.js";
 import { loadProposals } from "./evolutionCycle.js";
@@ -102,6 +109,12 @@ export interface GatewaySlashContext {
   getSession?: () => Promise<ChatSession>;
   /** Drop the peer's cached session (I-143 /engine) — next message opens fresh. */
   resetSession?: () => Promise<string | null>;
+  /**
+   * Re-open the peer's session KEEPING its history (I-174 /model): the cached
+   * SDK handle is closed but the stored session id survives, so the next message
+   * resumes the same conversation under the new setting.
+   */
+  reopenSession?: () => Promise<void>;
   yesIUnderstand?: boolean;
 }
 
@@ -222,6 +235,50 @@ export async function handleGatewaySlash(
       return had
         ? "Снял ожидание ответа на вопрос агента. Пиши что угодно — продолжим с нового."
         : "Нет ожидающего вопроса от агента. (Для отложенной задачи: /cancel <fu_id>.)";
+    }
+
+    case "model": {
+      // I-174: sticky per-chat model. Unlike /engine this keeps the session —
+      // every engine takes the model per turn — so the chat's context survives.
+      // Deliberately NOT a config edit: engine.model is global and would drag
+      // cron and the TUI along with it.
+      const cfg = loadConfig(ctx.dir);
+      const engine = getChatEngine(ctx.dir, ctx.adapter, ctx.chatId) ?? cfg.engine.provider;
+      // Resolve the config default THROUGH the active engine: a sticky engine
+      // switch drops engine.model (it named the other engine's model).
+      const cfgModel = resolveEngineModel(
+        engine === cfg.engine.provider ? cfg : { ...cfg, engine: { ...cfg.engine, provider: engine, model: undefined } }
+      );
+      const arg = p.arg.trim();
+      const sticky = getChatModel(ctx.dir, ctx.adapter, ctx.chatId);
+
+      if (!arg) {
+        const known = suggestedModels(engine);
+        return [
+          `model: **${sticky ?? cfgModel}**${sticky ? " (sticky для чата)" : " (из конфига)"} · движок ${engine}`,
+          known.length ? `Доступные: ${known.join(", ")}` : `Задай id модели движка ${engine}.`,
+          `Сменить: /model <id> · сброс к конфигу: /model off`,
+        ].join("\n");
+      }
+      if (arg.toLowerCase() === "off" || arg.toLowerCase() === "clear" || arg.toLowerCase() === "none") {
+        const had = clearChatModel(ctx.dir, ctx.adapter, ctx.chatId);
+        if (!had) return `sticky-модель не была задана — работает конфиг (**${cfgModel}**)`;
+        await ctx.reopenSession?.();
+        return `модель → **${cfgModel}** (из конфига). Контекст сохранён.`;
+      }
+      if (/\s/.test(arg)) return `в id модели не бывает пробелов — «${arg}»`;
+      // A cross-family id is accepted by nothing and would fail every following
+      // message until /model off, so refuse it here (same reasoning as the
+      // /engine credential pre-checks).
+      const conflict = modelConflict(engine, arg);
+      if (conflict) {
+        const known = suggestedModels(engine);
+        return `не переключаю: ${conflict}${known.length ? `. Доступные: ${known.join(", ")}` : ""}`;
+      }
+      if (arg === (sticky ?? cfgModel)) return `модель уже **${arg}** — ничего не меняю.`;
+      setChatModel(ctx.dir, ctx.adapter, ctx.chatId, arg);
+      await ctx.reopenSession?.();
+      return `модель → **${arg}** (sticky, движок ${engine}). Контекст сохранён.`;
     }
 
     case "engine": {

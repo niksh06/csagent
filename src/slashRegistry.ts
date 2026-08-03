@@ -48,6 +48,7 @@ export const SLASH_REGISTRY: SlashRegistryEntry[] = [
   { cmd: "stop", desc: "Discard current turn + clear queue", descGateway: "Прервать: отбросить текущий ответ и очистить очередь", surfaces: ["gateway"] },
   { cmd: "followups", desc: "List scheduled deferred follow-ups", descGateway: "Отложенные задачи агента (defer_followup)", surfaces: ["gateway"] },
   { cmd: "engine", desc: "Pick SDK engine (new session)", descGateway: "Движок SDK: cursor | claude | codex (sticky, новая сессия)", args: "[cursor|claude|codex|off]", surfaces: ["tui", "gateway"] },
+  { cmd: "model", desc: "Pick SDK model", descGateway: "Модель для этого чата (sticky, контекст сохраняется)", args: "[id|off]", surfaces: ["tui", "gateway"] },
 ];
 
 export function slashEntriesForSurface(surface: SlashSurface): SlashRegistryEntry[] {
