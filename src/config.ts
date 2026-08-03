@@ -138,15 +138,17 @@ export interface BrowserConfig {
   chromePath?: string;
 }
 
-/** Engine selection (Irida / I-100): which agent runtime executes the work. */
-export type EngineProvider = "cursor" | "claude-agent";
+/** Engine selection (Irida / I-100, I-144): which agent runtime executes the work. */
+export type EngineProvider = "cursor" | "claude-agent" | "codex";
 
 /**
- * Auth mode for the claude-agent engine:
- *  - "api-key": Anthropic API key (ANTHROPIC_API_KEY) — Console billing.
- *  - "account": Claude subscription via OAuth (CLAUDE_CODE_OAUTH_TOKEN from
- *    `claude setup-token`, or an existing `claude login` session in ~/.claude).
- * Ignored for the cursor engine.
+ * Auth mode for the claude-agent and codex engines:
+ *  - "api-key": provider API key (ANTHROPIC_API_KEY / OPENAI_API_KEY) — Console billing.
+ *  - "account": subscription session — Claude via OAuth (CLAUDE_CODE_OAUTH_TOKEN
+ *    from `claude setup-token`, or a `claude login` session in ~/.claude);
+ *    Codex via the `codex login` session in ~/.codex/auth.json.
+ * Ignored for the cursor engine. Defaults differ per engine: claude-agent
+ * defaults to "api-key", codex to "account" (its usual, unbilled path).
  */
 export type EngineAuth = "api-key" | "account";
 
@@ -182,11 +184,11 @@ export interface EvolutionConfig {
 }
 
 export interface EngineConfig {
-  /** Active runtime: Cursor SDK (default) or Anthropic Claude Agent SDK. */
+  /** Active runtime: Cursor SDK (default), Anthropic Claude Agent SDK, or OpenAI Codex. */
   provider: EngineProvider;
-  /** claude-agent auth mode (default "api-key"). */
+  /** Auth mode for claude-agent (default "api-key") and codex (default "account"). */
   auth?: EngineAuth;
-  /** Optional model override for the claude-agent engine (default claude-opus-4-8). */
+  /** Optional model override for the claude-agent/codex engines (see the DEFAULT_* constants). */
   model?: string;
   /** Runtime tool-permission policy for the claude-agent engine (I-94). */
   toolPolicy?: ToolPolicyConfig;
@@ -215,6 +217,38 @@ export function resolveSanitizeInput(engine: EngineConfig): boolean {
 
 /** Default model for the claude-agent engine when none is configured. */
 export const DEFAULT_CLAUDE_AGENT_MODEL = "claude-opus-4-8";
+
+/**
+ * Default model for the codex engine. Declared by Irida rather than inherited:
+ * the adapter runs the CLI under its own CODEX_HOME precisely so the operator's
+ * personal `~/.codex/config.toml` cannot decide what an autonomous run uses.
+ * Verified against the live subscription on 2026-07-31 (codex-cli 0.146.0).
+ */
+export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
+
+/**
+ * Effective model for the active engine. `engine.model` overrides only for the
+ * engines that own one; the cursor engine reads the top-level `model`. One
+ * definition so chat, one-shot `run` and `/model` can never disagree about what
+ * the next turn will actually use.
+ */
+export function resolveEngineModel(cfg: AgentConfig): string {
+  if (cfg.engine.provider === "claude-agent") return cfg.engine.model ?? DEFAULT_CLAUDE_AGENT_MODEL;
+  if (cfg.engine.provider === "codex") return cfg.engine.model ?? DEFAULT_CODEX_MODEL;
+  return cfg.model;
+}
+
+/**
+ * Effective auth mode for an engine. The two account-capable engines default
+ * differently: claude-agent to "api-key" (its historical default), codex to
+ * "account" — the `codex login` subscription session, which costs nothing per
+ * token and is what the CLI itself uses. The cursor engine has one mode.
+ */
+export function resolveEngineAuth(engine: EngineConfig): EngineAuth {
+  if (engine.provider === "codex") return engine.auth ?? "account";
+  if (engine.provider === "claude-agent") return engine.auth ?? "api-key";
+  return "api-key";
+}
 
 /** Wisp pet snapshot bus (.agent/pet-state.json) — on unless disabled. */
 export interface PetConfig {
@@ -289,15 +323,35 @@ export function resolveMemoryRoot(projectDir: string = process.cwd()): string {
   return resolve(projectDir, stateDir);
 }
 
+/**
+ * Human-friendly engine names → provider id; null = not an engine name. One
+ * source of truth for every entry point (`--engine`, `/engine`, the sticky
+ * per-chat store), so an alias never works in one surface and not another.
+ * "openai"/"gpt" resolve to codex: that is the OpenAI runtime Irida drives.
+ */
+export function normalizeEngineProvider(arg: string): EngineProvider | null {
+  const a = arg.trim().toLowerCase();
+  if (a === "cursor") return "cursor";
+  if (a === "claude" || a === "claude-agent" || a === "claude_agent" || a === "claudeagent") {
+    return "claude-agent";
+  }
+  if (a === "codex" || a === "openai" || a === "oai" || a === "gpt") return "codex";
+  return null;
+}
+
+/** Engine names accepted by `--engine` / `/engine`, for error messages. */
+export const ENGINE_CHOICES = "cursor | claude | codex";
+
 /** Apply CLI `--engine` / `--auth` overrides onto a loaded config (I-100). Throws ConfigError on bad values. */
 export function applyEngineOverride(cfg: AgentConfig, provider?: string, auth?: string): AgentConfig {
   if (!provider && !auth) return cfg;
   const engine: EngineConfig = { ...cfg.engine };
   if (provider) {
-    if (provider !== "cursor" && provider !== "claude-agent") {
-      throw new ConfigError(`--engine must be 'cursor' or 'claude-agent' (got '${provider}')`);
+    const normalized = normalizeEngineProvider(provider);
+    if (!normalized) {
+      throw new ConfigError(`--engine must be ${ENGINE_CHOICES} (got '${provider}')`);
     }
-    engine.provider = provider;
+    engine.provider = normalized;
   }
   if (auth) {
     if (auth !== "api-key" && auth !== "account") {
@@ -456,7 +510,7 @@ const evolutionSchema = z.object({
 });
 
 const engineSchema = z.object({
-  provider: z.enum(["cursor", "claude-agent"]).optional(),
+  provider: z.enum(["cursor", "claude-agent", "codex"]).optional(),
   auth: z.enum(["api-key", "account"]).optional(),
   model: nonEmptyString.optional(),
   toolPolicy: toolPolicySchema.optional(),

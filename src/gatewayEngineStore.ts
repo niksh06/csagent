@@ -9,7 +9,7 @@
  */
 import { existsSync, readFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadConfig, type EngineProvider } from "./config.js";
+import { loadConfig, normalizeEngineProvider, type EngineProvider } from "./config.js";
 import { writeFileAtomic } from "./util.js";
 import { peerKey } from "./gatewayPeers.js";
 
@@ -23,12 +23,7 @@ export interface GatewayEnginesFile {
 
 /** Human-friendly aliases → provider id; null = not a valid engine name. */
 export function parseEngineArg(arg: string): EngineProvider | null {
-  const a = arg.trim().toLowerCase();
-  if (a === "cursor") return "cursor";
-  if (a === "claude" || a === "claude-agent" || a === "claude_agent" || a === "claudeagent") {
-    return "claude-agent";
-  }
-  return null;
+  return normalizeEngineProvider(arg);
 }
 
 function enginesPath(dir: string): string {
@@ -43,7 +38,7 @@ export function loadGatewayEngines(dir: string): GatewayEnginesFile {
     const raw = parsed.engines && typeof parsed.engines === "object" ? parsed.engines : {};
     const engines: Record<string, EngineProvider> = {};
     for (const [k, v] of Object.entries(raw)) {
-      if (v === "cursor" || v === "claude-agent") engines[k] = v;
+      if (v === "cursor" || v === "claude-agent" || v === "codex") engines[k] = v;
     }
     return { version: 1, engines };
   } catch {

@@ -63,7 +63,11 @@ test("parseEngineArg accepts aliases and rejects junk", () => {
   assert.equal(parseEngineArg("cursor"), "cursor");
   assert.equal(parseEngineArg("claude"), "claude-agent");
   assert.equal(parseEngineArg("Claude-Agent"), "claude-agent");
-  assert.equal(parseEngineArg("gpt"), null);
+  // I-144: the OpenAI runtime Irida drives is codex; gpt/openai/oai alias to it.
+  assert.equal(parseEngineArg("codex"), "codex");
+  assert.equal(parseEngineArg("gpt"), "codex");
+  assert.equal(parseEngineArg("openai"), "codex");
+  assert.equal(parseEngineArg("gemini"), null);
   assert.equal(parseEngineArg(""), null);
 });
 
@@ -146,7 +150,8 @@ test("/engine refuses a doomed switch: claude-agent with api-key auth and no key
 test("/engine rejects unknown engines", async () => {
   const dir = tmp();
   const resets: string[] = [];
-  const reply = await handleGatewaySlash("/engine gpt", ctxFor(dir, resets));
+  // Not "gpt" — that aliases to codex since I-144.
+  const reply = await handleGatewaySlash("/engine gemini", ctxFor(dir, resets));
   assert.match(reply!, /неизвестный движок/);
   assert.deepEqual(resets, []);
 });

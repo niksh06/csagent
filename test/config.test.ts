@@ -91,7 +91,10 @@ test("applyEngineOverride: sets provider+auth, validates, no mutation, no-op", (
   assert.equal(o.engine.auth, "account");
   assert.equal(base.engine.provider, "cursor"); // original untouched
   assert.equal(applyEngineOverride(base).engine.provider, "cursor"); // no-op when no flags
-  assert.throws(() => applyEngineOverride(base, "gpt"), ConfigError);
+  // "gpt" is a codex alias since I-144; a real non-engine still throws.
+  assert.equal(applyEngineOverride(base, "gpt").engine.provider, "codex");
+  assert.equal(applyEngineOverride(base, "openai").engine.provider, "codex");
+  assert.throws(() => applyEngineOverride(base, "gemini"), ConfigError);
   assert.throws(() => applyEngineOverride(base, undefined, "oauth"), ConfigError);
 });
 
