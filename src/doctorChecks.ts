@@ -23,6 +23,7 @@ import {
   validateTelegramBotTokenFormat,
 } from "./credentials.js";
 import { probePgCredentialStore, SECRETS_KEY_ENV, secretsKey, secretsKeyStrengthIssue } from "./credentialsPg.js";
+import { runLogEnabled } from "./runLog.js";
 import { probePgGatewayAllowlist } from "./gatewayAllowedPg.js";
 import { pgUrl } from "./pg/pool.js";
 import {
@@ -236,12 +237,18 @@ export function gatherDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   return checks;
 }
 
-function gatherRunLogChecks(dir: string): DoctorCheck[] {
+/** Exported for unit tests. */
+export function gatherRunLogChecks(dir: string): DoctorCheck[] {
   let stateDir = ".agent";
   try {
     stateDir = loadConfig(dir).stateDir;
   } catch {
     return [];
+  }
+  // "Log disabled" and "log empty" must never share the same words: a green
+  // "no runs" on a blinded recorder is a false-healthy (Vesper §98).
+  if (!runLogEnabled()) {
+    return [{ name: "run log tokens", ok: true, detail: "run log DISABLED (IRIDA_RUN_LOG=0) — usage is not recorded" }];
   }
   const metrics = loadRunMetrics(dir, stateDir, 24);
   if (metrics.runs === 0) {

@@ -143,13 +143,31 @@ export function evaluateEngineErrorStreak(dir: string, now: number): SelfMonitor
   };
 }
 
-/** Reuse the existing gateway probes for infra health (store/poll/outbox). */
-async function gatherInfraChecks(dir: string): Promise<SelfMonitorCheck[]> {
+/**
+ * Reuse the existing gateway probes for infra health (store/poll/outbox).
+ * Probes are injectable and the function exported for unit tests only.
+ */
+export async function gatherInfraChecks(
+  dir: string,
+  probes: {
+    status: typeof gatherGatewayStatus;
+    store: typeof gatherGatewayStoreStatusLines;
+  } = { status: gatherGatewayStatus, store: gatherGatewayStoreStatusLines }
+): Promise<SelfMonitorCheck[]> {
   let rows;
   try {
-    rows = [...gatherGatewayStatus(dir), ...(await gatherGatewayStoreStatusLines())];
-  } catch {
-    return [];
+    rows = [...probes.status(dir), ...(await probes.store())];
+  } catch (e) {
+    // A thrown probe must not read as confirmed-healthy — this module's
+    // contract is "silence means healthy", so the failure itself goes red
+    // instead of vanishing into an empty check list (Vesper §103).
+    return [
+      {
+        name: "infra probes",
+        ok: false,
+        detail: `probe threw: ${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
   }
   return rows
     .filter((r) => INFRA_ROWS.has(r.name))

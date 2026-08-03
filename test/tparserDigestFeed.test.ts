@@ -455,3 +455,15 @@ test("the feed job reports an unreachable TParser instead of throwing", async ()
     else process.env.IRIDA_TPARSER_TOKEN = prevTok;
   }
 });
+
+test("fetched-vs-kept is visible: raw_fetched printed, wild discrepancy warns in-band", () => {
+  const quiet = formatDigestFeed(buildDigestFeed([post()], WINDOW_START, WINDOW_END, false, 2), { timeZone: TZ });
+  assert.match(quiet, /raw_fetched=2/);
+  assert.doesNotMatch(quiet, /расхождение вне нормы/);
+  const loop = formatDigestFeed(buildDigestFeed([post()], WINDOW_START, WINDOW_END, false, 5050), { timeZone: TZ });
+  assert.match(loop, /raw_fetched=5050/);
+  assert.match(loop, /расхождение вне нормы/);
+  // Absence of the measurement stays absent — not rendered as zero.
+  const unknown = formatDigestFeed(buildDigestFeed([post()], WINDOW_START, WINDOW_END), { timeZone: TZ });
+  assert.doesNotMatch(unknown, /raw_fetched/);
+});
