@@ -104,3 +104,18 @@ describe("formatters", () => {
     assert.match(formatSelfMonitorHeartbeat(GREEN), /✅/);
   });
 });
+
+describe("gatherInfraChecks (a thrown probe is red, not silence — Vesper §103)", () => {
+  it("returns one red row when a probe throws instead of an empty list", async () => {
+    const { gatherInfraChecks } = await import("../src/selfMonitor.js");
+    const rows = await gatherInfraChecks("/nonexistent", {
+      status: () => {
+        throw new Error("pg exploded");
+      },
+      store: async () => [],
+    });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].ok, false);
+    assert.match(rows[0].detail, /pg exploded/);
+  });
+});

@@ -11,6 +11,7 @@ import { backgroundPauseState, setBackgroundPaused } from "./backgroundPause.js"
 import { createMemoryStore } from "./memoryStore.js";
 import { loadConfig } from "./config.js";
 import { loadRunMetrics, formatRunMetrics, loadSessionUsage, formatSessionUsage } from "./runMetrics.js";
+import { runLogEnabled } from "./runLog.js";
 import { loadProposals } from "./evolutionCycle.js";
 import { loadSkillLedger, rollbackAgentSkill } from "./skillApply.js";
 import { getChatMode, setChatMode, clearChatMode } from "./gatewayModeStore.js";
@@ -134,7 +135,12 @@ export async function handleGatewaySlash(
     case "usage": {
       const cfg = loadConfig(ctx.dir);
       const m = loadRunMetrics(ctx.dir, cfg.stateDir, 24, { prodOnly: true });
-      const lines = [`irida usage`, `24h: ${formatRunMetrics(m, 24, { prodOnly: true })}`];
+      const lines = [
+        `irida usage`,
+        runLogEnabled()
+          ? `24h: ${formatRunMetrics(m, 24, { prodOnly: true })}`
+          : "24h: run log disabled (IRIDA_RUN_LOG=0) — no data",
+      ];
       const sid = loadGatewayPeers(ctx.dir).peers[peerKey(ctx.adapter, ctx.chatId)];
       if (sid) lines.push(formatSessionUsage(loadSessionUsage(ctx.dir, cfg.stateDir, sid)));
       const account =

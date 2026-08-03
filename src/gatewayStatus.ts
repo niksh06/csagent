@@ -18,6 +18,7 @@ import { gatherCronContextDirIssue } from "./cronContextArtifact.js";
 import { cronJobsPath, loadCronJobs, loadCronState, validateCronJobsFile } from "./cronJobs.js";
 import { formatCronLastResultSummary } from "./cronRunRecord.js";
 import { formatRunMetrics, loadRunMetrics } from "./runMetrics.js";
+import { runLogEnabled } from "./runLog.js";
 import { assessOutboxHealth } from "./gatewayOutbox.js";
 import { loadFollowups } from "./gatewayFollowupStore.js";
 
@@ -195,18 +196,22 @@ export function gatherGatewayStatus(dir: string = process.cwd()): GatewayStatusL
     });
   }
   try {
-    const metrics = loadRunMetrics(dir, cfg.stateDir, 24, { prodOnly: true });
-    // On the account (subscription) engine the $ is what it WOULD cost metered —
-    // the subscription doesn't pay it. Flag that so the estimate isn't misread.
-    const acct =
-      cfg.engine.provider === "claude-agent" &&
-      (cfg.engine.auth ?? "api-key") === "account" &&
-      metrics.costUsd != null;
-    rows.push({
-      name: "runs 24h",
-      ok: true,
-      detail: formatRunMetrics(metrics, 24, { prodOnly: true }) + (acct ? " · subscription (no metered charge)" : ""),
-    });
+    if (!runLogEnabled()) {
+      rows.push({ name: "runs 24h", ok: true, detail: "run log disabled (IRIDA_RUN_LOG=0) — metrics unavailable" });
+    } else {
+      const metrics = loadRunMetrics(dir, cfg.stateDir, 24, { prodOnly: true });
+      // On the account (subscription) engine the $ is what it WOULD cost metered —
+      // the subscription doesn't pay it. Flag that so the estimate isn't misread.
+      const acct =
+        cfg.engine.provider === "claude-agent" &&
+        (cfg.engine.auth ?? "api-key") === "account" &&
+        metrics.costUsd != null;
+      rows.push({
+        name: "runs 24h",
+        ok: true,
+        detail: formatRunMetrics(metrics, 24, { prodOnly: true }) + (acct ? " · subscription (no metered charge)" : ""),
+      });
+    }
   } catch {
     // metrics are best-effort
   }

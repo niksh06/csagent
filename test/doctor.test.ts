@@ -243,3 +243,21 @@ test("doctor: embeddings check stays quiet when embeddings are off", async () =>
   assert.equal(checks[0]?.ok, true);
   assert.match(checks[0]?.detail ?? "", /disabled/);
 });
+
+test("run log checks: disabled recorder is named, not passed off as 'no runs' (Vesper §98)", async () => {
+  const { gatherRunLogChecks } = await import("../src/doctorChecks.js");
+  const dir = mkdtempSync(resolve(tmpdir(), "doc-runlog-"));
+  const prev = process.env.IRIDA_RUN_LOG;
+  try {
+    process.env.IRIDA_RUN_LOG = "0";
+    const off = gatherRunLogChecks(dir);
+    assert.equal(off.length, 1);
+    assert.match(off[0].detail, /DISABLED/);
+    delete process.env.IRIDA_RUN_LOG;
+    const on = gatherRunLogChecks(dir);
+    assert.match(on[0]?.detail ?? "", /no runs in last 24h/);
+  } finally {
+    if (prev === undefined) delete process.env.IRIDA_RUN_LOG;
+    else process.env.IRIDA_RUN_LOG = prev;
+  }
+});

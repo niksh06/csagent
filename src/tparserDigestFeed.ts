@@ -115,6 +115,12 @@ export interface FeedStats {
   redacted: number;
   /** Pagination hit TPARSER_MAX_PAGES — the window is incomplete. */
   truncated: boolean;
+  /**
+   * Raw API rows before the window filter, when known (null = not measured).
+   * "Fetched a lot, kept a little" must be visible, not silent — a looping
+   * cursor once produced 5050 rows for 100 posts (Vesper, TParser грань B).
+   */
+  fetchedRows: number | null;
   /** Selected as a share of everything that arrived. */
   coveragePct: number;
   /** Selected as a share of posts that have any text at all. */
@@ -292,7 +298,8 @@ export function buildDigestFeed(
   posts: TparserPost[],
   windowStart: Date,
   windowEnd: Date,
-  truncated = false
+  truncated = false,
+  fetchedRows: number | null = null
 ): DigestFeed {
   const readable = posts.filter((p) => !p.empty);
   const byTopic = new Map<string, TparserPost[]>();
@@ -341,6 +348,7 @@ export function buildDigestFeed(
       channels: new Set(posts.map((p) => p.channelName)).size,
       redacted: 0,
       truncated,
+      fetchedRows,
       coveragePct: posts.length ? Math.round((1000 * selected) / posts.length) / 10 : 0,
       coverageReadablePct: readableCount ? Math.round((1000 * selected) / readableCount) / 10 : 0,
     },
@@ -437,7 +445,8 @@ export function formatDigestFeed(feed: DigestFeed, opts: FeedFormatOptions = {})
     "",
     "СЧЁТЧИКИ ДЛЯ ШАПКИ ДАЙДЖЕСТА — копировать как есть, не пересчитывать:",
     `  total=${s.total}  selected=${s.selected}  coverage=${s.coveragePct}%  urgent=${s.urgent}`,
-    `  offtopic=${s.offTopic}  media_no_text=${s.empty}  channels=${s.channels}`,
+    `  offtopic=${s.offTopic}  media_no_text=${s.empty}  channels=${s.channels}` +
+      (s.fetchedRows != null ? `  raw_fetched=${s.fetchedRows}` : ""),
     "",
     `Отбор: топ-${Math.round(DIGEST_TOPIC_SHARE * 100)}% каждой темы по priority ` +
       `(не меньше ${DIGEST_TOPIC_FLOOR}, не больше ${DIGEST_TOPIC_CAP}), плюс ВСЕ alert и urgency≥${DIGEST_URGENCY_MIN}.`,
@@ -447,6 +456,12 @@ export function formatDigestFeed(feed: DigestFeed, opts: FeedFormatOptions = {})
   if (s.truncated) {
     lines.push(
       `ВНИМАНИЕ: пагинация упёрлась в ${TPARSER_MAX_PAGES} страниц — окно НЕПОЛНОЕ, скажи об этом в шапке.`
+    );
+  }
+  if (s.fetchedRows != null && s.fetchedRows > 3 * Math.max(1, s.total)) {
+    lines.push(
+      `ВНИМАНИЕ: API отдал ${s.fetchedRows} строк, в окно попало ${s.total} — расхождение вне нормы ` +
+        "(зацикленный курсор или дубли?), скажи об этом в шапке."
     );
   }
   if (feed.offTopic.length) {
@@ -532,7 +547,7 @@ export async function buildTparserDigestFeed(
     windowEnd,
     fetchFn: opts.fetchFn,
   });
-  const feed = buildDigestFeed(fetched.posts, windowStart, windowEnd, fetched.truncated);
+  const feed = buildDigestFeed(fetched.posts, windowStart, windowEnd, fetched.truncated, fetched.fetched);
   const text = formatDigestFeed(feed, opts.timeZone ? { timeZone: opts.timeZone } : {});
   return { text, feed };
 }
