@@ -5,21 +5,25 @@ Guidance for working in this repository.
 ## What this is
 
 **Irida** (ранее «Cursor agent» / CSAgent) — local-first персональный агент:
-**один интерфейс, два движка**. Пользователь выбирает рантайм через `engine.provider`
+**один интерфейс, три движка**. Пользователь выбирает рантайм через `engine.provider`
 в `agent.config.json` (или флагом `--engine`):
 
 - **`cursor`** (по умолчанию) — родной agent-runtime Cursor SDK;
 - **`claude-agent`** — Anthropic Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`),
   с двумя режимами auth (`engine.auth`): `api-key` (`ANTHROPIC_API_KEY`) или
-  `account` (`CLAUDE_CODE_OAUTH_TOKEN` / сессия `claude login`).
+  `account` (`CLAUDE_CODE_OAUTH_TOKEN` / сессия `claude login`);
+- **`codex`** — OpenAI Codex (`@openai/codex-sdk`), алиасы `openai`/`gpt`/`oai`;
+  auth по умолчанию `account` (сессия `codex login`), опционально `api-key`
+  (`OPENAI_API_KEY`). CLI запускается под изолированным `CODEX_HOME`, чтобы личный
+  `~/.codex/config.toml` оператора не протекал в прогоны агента.
 
-Это **сознательно расширяет** исходный принцип «без второго loop»: теперь движков два,
+Это **сознательно расширяет** исходный принцип «без второго loop»: движков теперь три,
 равноправно выбираемых. Hermes-inspired UX (sessions, skills, MCP, safety). TypeScript/Node.
-См. [RENAME_TO_IRIDA.md](RENAME_TO_IRIDA.md) и issue I-100.
+См. [RENAME_TO_IRIDA.md](RENAME_TO_IRIDA.md), issue I-100 и I-144.
 
 ## Stack
 
-Node · TypeScript (сборка в `dist/`) · Cursor SDK + Claude Agent SDK · MCP-серверы ·
+Node · TypeScript (сборка в `dist/`) · Cursor SDK + Claude Agent SDK + Codex SDK · MCP-серверы ·
 gateway · launchd/cron для фоновых задач. Состояние агента живёт в `~/.irida/`
 (legacy `~/.csagent/` ещё читается — переходный shim).
 
