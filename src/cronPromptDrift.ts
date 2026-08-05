@@ -50,6 +50,8 @@ export function gatherCronPromptDrift(configDir: string): CronPromptDriftResult 
   }
 
   for (const job of jobs) {
+    // Builtin and script jobs run without a prompt — nothing to drift.
+    if (job.builtin || job.script) continue;
     if (job.topicDelegates) {
       const topic = job.topicPromptFile?.trim();
       const synth = job.synthesizePromptFile?.trim();

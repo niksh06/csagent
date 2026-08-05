@@ -16,6 +16,17 @@ test("gatherCronPromptDrift warns on inline digest prompt", () => {
   assert.match(r.warnings[0] ?? "", /inline prompt/);
 });
 
+test("gatherCronPromptDrift skips builtin and script jobs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "drift-bs-"));
+  writeExampleCronJobs(dir, [
+    { id: "tparser-digest-feed", cron: "0 */2 * * *", builtin: "tparser-digest-feed" },
+    { id: "aleph-alerts-digest", cron: "0 9 * * *", script: "scripts/alerts.sh" },
+  ]);
+  const r = gatherCronPromptDrift(dir);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.warnings, []);
+});
+
 test("gatherCronPromptDrift detects hash drift vs deploy", () => {
   const dir = mkdtempSync(join(tmpdir(), "drift2-"));
   const deploy = join(dir, "deploy", "prompts");
