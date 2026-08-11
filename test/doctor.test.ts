@@ -19,6 +19,48 @@ function withKey(value: string | undefined, fn: () => void | Promise<void>): Pro
   });
 }
 
+test("gatherCronNotifyChecks flags notify blocks without chatId (§107)", async () => {
+  const { gatherCronNotifyChecks } = await import("../src/doctorChecks.js");
+  const { cronJobsPath } = await import("../src/cronJobs.js");
+  const dir = mkdtempSync(resolve(tmpdir(), "doc-notify-"));
+  const path = cronJobsPath(dir);
+  mkdirSync(resolve(path, ".."), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      jobs: [
+        { id: "loud", cron: "0 9 * * *", prompt: "x", notify: { chatId: "42", telegram: true } },
+        { id: "mute", cron: "0 9 * * *", prompt: "x", notify: { telegram: true, webhookUrl: "https://x" } },
+        { id: "silent-by-design", cron: "0 9 * * *", prompt: "x" },
+      ],
+    })
+  );
+  const checks = gatherCronNotifyChecks(dir);
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].ok, false);
+  assert.match(checks[0].detail, /mute/);
+  assert.doesNotMatch(checks[0].detail, /loud|silent-by-design/);
+});
+
+test("gatherCronNotifyChecks passes when every notify has a chatId", async () => {
+  const { gatherCronNotifyChecks } = await import("../src/doctorChecks.js");
+  const { cronJobsPath } = await import("../src/cronJobs.js");
+  const dir = mkdtempSync(resolve(tmpdir(), "doc-notify-ok-"));
+  const path = cronJobsPath(dir);
+  mkdirSync(resolve(path, ".."), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      jobs: [{ id: "loud", cron: "0 9 * * *", prompt: "x", notify: { chatId: "42" } }],
+    })
+  );
+  const checks = gatherCronNotifyChecks(dir);
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].ok, true);
+});
+
 test("doctor fails without API key", async () => {
   await withKey(undefined, async () => {
     const dir = mkdtempSync(resolve(tmpdir(), "doc-"));

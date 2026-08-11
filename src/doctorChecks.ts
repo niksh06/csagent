@@ -1,7 +1,7 @@
 /**
  * Doctor checks as data (shared by CLI and TUI).
  */
-import { accessSync, constants, existsSync, readdirSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { iridaHome } from "./env.js";
 import {
@@ -253,6 +253,7 @@ export function gatherDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
         detail: guard.length ? guard.join("; ") : "no injection patterns",
       });
     }
+    checks.push(...gatherCronNotifyChecks(dir));
   }
 
   const gwPath = gatewayConfigPath(dir);
@@ -267,6 +268,44 @@ export function gatherDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   }
 
   return checks;
+}
+
+/**
+ * Exported for unit tests. A notify block without chatId is silently dropped
+ * by the cron parser — the job runs, but its declared channel never speaks
+ * (Vesper's §107). The parsed jobs have already lost that intent, so this
+ * check reads the raw file.
+ */
+export function gatherCronNotifyChecks(dir: string): DoctorCheck[] {
+  const path = cronJobsPath(dir);
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return []; // the "cron jobs" check already reports parse failures
+  }
+  const jobs = (parsed as { jobs?: unknown }).jobs;
+  if (!Array.isArray(jobs)) return [];
+  const mute: string[] = [];
+  for (const raw of jobs) {
+    if (raw == null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const o = raw as Record<string, unknown>;
+    const n = o.notify;
+    if (n == null || typeof n !== "object" || Array.isArray(n)) continue;
+    const chatId = typeof (n as Record<string, unknown>).chatId === "string" ? String((n as Record<string, unknown>).chatId).trim() : "";
+    if (!chatId) mute.push(String(o.id ?? "<no id>"));
+  }
+  return [
+    {
+      name: "cron notify",
+      ok: mute.length === 0,
+      detail: mute.length
+        ? `notify declared without chatId — job runs silent: ${mute.join(", ")}`
+        : "all notify blocks have a chatId",
+      ...(mute.length ? { fix: "add notify.chatId or drop the notify block in cron.jobs.json" } : {}),
+    },
+  ];
 }
 
 /** Exported for unit tests. */
