@@ -127,13 +127,17 @@ export function resolveTelegramGetUpdatesTimeoutSec(_pollIntervalMs: number): nu
   return 0;
 }
 
-/** Global Bot API filter — must include message/group traffic (not channel_post only). */
+/**
+ * Global Bot API filter — must include message/group traffic (not channel_post
+ * only). No callback_query here: nothing in the gateway sends inline keyboards
+ * and no handler consumes callbacks — re-add it together with both when
+ * buttons appear (Vesper's §106 scan: a declared intake nobody drains).
+ */
 export const TELEGRAM_GATEWAY_ALLOWED_UPDATES = [
   "message",
   "edited_message",
   "channel_post",
   "edited_channel_post",
-  "callback_query",
 ] as const;
 
 /** Required for gateway inbound (private + group messages). */
