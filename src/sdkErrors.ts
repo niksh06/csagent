@@ -43,6 +43,22 @@ export function formatSdkError(e: unknown): FormattedSdkError {
   const auth = isAuthError(e, detail);
   const raw = e instanceof Error ? e.message : String(e);
 
+  // Codex CLI subprocess death. The SDK error carries only the first stderr
+  // line ("Reading prompt from stdin..."), so the real cause (usage limit,
+  // expired `codex login`) is invisible here — say what the likely causes are
+  // and how to move instead of echoing the stub. Non-rotatable: the token pool
+  // is Claude-side and cannot help a Codex subprocess.
+  if (/Codex Exec exited with code \d+/i.test(raw)) {
+    return {
+      message: redact(
+        `${raw.split("\n")[0]} — частые причины: исчерпан лимит ChatGPT Codex (chatgpt.com/codex/settings/usage) или протухшая сессия codex login. Обойти сейчас: /engine claude`
+      ),
+      errorKind: "sdk",
+      recoverable: false,
+      rotatable: false,
+    };
+  }
+
   // Transient capacity/permission errors — account/subscription bursts return
   // `403 Request not allowed`, plus 429/529/503/overloaded. Rotating the session
   // NEVER helps (the fresh agent hits the same upstream state) and just sheds
