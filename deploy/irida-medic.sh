@@ -33,9 +33,15 @@ if [ -f "$GW_LOG" ]; then
   AGE=$(( $(date +%s) - $(stat -f %m "$GW_LOG") ))
   if [ "$AGE" -lt 600 ]; then add "gateway poll: fresh (${AGE}s)"; else add "gateway poll: STALE (${AGE}s)"; RED+=("poll-stale"); fi
 fi
-# error-log burst since last probe (gateway error lines carry no timestamps)
+# error-log burst since last probe (gateway error lines carry no timestamps).
+# First run (no state yet) only records the baseline — history is not a burst.
 ERR_SIZE=$(stat -f %z "$GW_ERR" 2>/dev/null || echo 0)
-LAST_SIZE=$(python3 -c "import json;print(json.load(open('$STATE')).get('errSize',0))" 2>/dev/null || echo 0)
+if [ ! -f "$STATE" ]; then
+  LAST_SIZE="$ERR_SIZE"
+  add "gateway errors: baseline initialized"
+else
+  LAST_SIZE=$(python3 -c "import json;print(json.load(open('$STATE')).get('errSize',0))" 2>/dev/null || echo 0)
+fi
 if [ "$ERR_SIZE" -gt "$LAST_SIZE" ]; then
   DELTA=$(tail -c $((ERR_SIZE - LAST_SIZE)) "$GW_ERR" 2>/dev/null)
   BURST=$(printf '%s' "$DELTA" | grep -c "sendTurn error" || true)
