@@ -132,7 +132,7 @@ export async function handleGatewaySlash(
       return gatewaySlashHelpText();
 
     case "status": {
-      const rows = gatherGatewayStatus(ctx.dir);
+      const rows = gatherGatewayStatus(ctx.dir, { adapter: ctx.adapter, chatId: ctx.chatId });
       const lines = rows.map((r) => `${r.ok ? "OK" : "FAIL"} ${r.name}: ${r.detail}`);
       // Wisp mood first (I-149): the snapshot re-derives with a live clock, so
       // happy fades and sleep kicks in even between turns. No snapshot → no line.
@@ -262,9 +262,9 @@ export async function handleGatewaySlash(
       }
       if (arg.toLowerCase() === "off" || arg.toLowerCase() === "clear" || arg.toLowerCase() === "none") {
         const had = clearChatModel(ctx.dir, ctx.adapter, ctx.chatId);
-        if (!had) return `sticky-модель не была задана — работает конфиг (**${cfgModel}**)`;
+        if (!had) return `sticky-модель не была задана — работает конфиг (**${cfgModel}**, движок ${engine})`;
         await ctx.reopenSession?.();
-        return `модель → **${cfgModel}** (из конфига). Контекст сохранён.`;
+        return `модель → **${cfgModel}** (из конфига, движок ${engine}). Контекст сохранён.`;
       }
       if (/\s/.test(arg)) return `в id модели не бывает пробелов — «${arg}»`;
       // A cross-family id is accepted by nothing and would fail every following

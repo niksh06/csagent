@@ -21,6 +21,7 @@ import { formatRunMetrics, loadRunMetrics } from "./runMetrics.js";
 import { runLogEnabled } from "./runLog.js";
 import { assessOutboxHealth } from "./gatewayOutbox.js";
 import { loadFollowups } from "./gatewayFollowupStore.js";
+import { getChatEngine } from "./gatewayEngineStore.js";
 
 export interface GatewayStatusLine {
   name: string;
@@ -65,7 +66,10 @@ function logAgeMs(path: string): number {
   return existsSync(path) ? Date.now() - statSync(path).mtimeMs : Number.POSITIVE_INFINITY;
 }
 
-export function gatherGatewayStatus(dir: string = process.cwd()): GatewayStatusLine[] {
+export function gatherGatewayStatus(
+  dir: string = process.cwd(),
+  chat?: { adapter: string; chatId: string }
+): GatewayStatusLine[] {
   const rows: GatewayStatusLine[] = [];
   const home = iridaHome() || resolve(dir, "..", "..");
   const logDir = resolve(home, "logs");
@@ -177,15 +181,25 @@ export function gatherGatewayStatus(dir: string = process.cwd()): GatewayStatusL
   rows.push({ name: "outbox", ok: outbox.ok, detail: outbox.detail });
 
   const cfg = loadConfig(dir);
+  // The chat's EFFECTIVE engine, not the config default: a sticky /engine
+  // choice silently outlives its session, and /status claiming the config
+  // engine while the chat runs another is exactly how a dead upstream looked
+  // like «irida сломалась» (12.08: sticky codex + exhausted Codex limit).
+  const sticky = chat ? getChatEngine(dir, chat.adapter, chat.chatId) : null;
+  const provider = sticky ?? cfg.engine.provider;
+  const stickyMark = sticky ? " · sticky для чата (/engine off — вернуть конфиг)" : "";
+  const engineDetail =
+    provider === "claude-agent"
+      ? `claude-agent (auth=${cfg.engine.auth ?? "api-key"}, model=${cfg.engine.model ?? "claude-opus-4-8"})`
+      : provider === "codex"
+        ? `codex (auth=${cfg.engine.auth ?? "account"})`
+        : `cursor (model=${cfg.model})`;
   rows.push({
     name: "engine",
     ok: true,
-    detail:
-      cfg.engine.provider === "claude-agent"
-        ? `claude-agent (auth=${cfg.engine.auth ?? "api-key"}, model=${cfg.engine.model ?? "claude-opus-4-8"})`
-        : `cursor (model=${cfg.model})`,
+    detail: engineDetail + stickyMark,
   });
-  if (cfg.engine.provider === "claude-agent") {
+  if (provider === "claude-agent") {
     // Informational (I-94): reflect the runtime tool-deny gate for the gateway
     // surface. Not a WARN — the gate is opt-in by design.
     const gateOn = resolveDenyDestructive(cfg.engine, "telegram");
