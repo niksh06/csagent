@@ -59,6 +59,26 @@ test("gatherGatewayStatus reports gateway config when present", () => {
   assert.equal(cfg!.ok, true);
 });
 
+test("gatherGatewayStatus engine row follows the chat's sticky engine", async () => {
+  const { setChatEngine } = await import("../src/gatewayEngineStore.js");
+  const dir = mkdtempSync(join(tmpdir(), "gwstat-eng-"));
+  writeExampleGatewayConfig(dir);
+
+  const before = gatherGatewayStatus(dir, { adapter: "telegram", chatId: "42" }).find((r) => r.name === "engine");
+  assert.ok(before);
+  assert.doesNotMatch(before!.detail, /sticky/);
+
+  setChatEngine(dir, "telegram", "42", "codex");
+  const after = gatherGatewayStatus(dir, { adapter: "telegram", chatId: "42" }).find((r) => r.name === "engine");
+  assert.ok(after);
+  assert.match(after!.detail, /codex/);
+  assert.match(after!.detail, /sticky для чата/);
+
+  // Another chat is untouched by the sticky choice.
+  const other = gatherGatewayStatus(dir, { adapter: "telegram", chatId: "7" }).find((r) => r.name === "engine");
+  assert.doesNotMatch(other!.detail, /sticky/);
+});
+
 test("gatherGatewayStatus reads gateway.log for operational health", () => {
   const dir = mkdtempSync(join(tmpdir(), "gwstat-err-"));
   const home = join(dir, "home");
