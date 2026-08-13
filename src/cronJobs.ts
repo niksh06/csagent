@@ -347,17 +347,15 @@ export const CRON_DUE_GRACE_MINUTES = 10;
 export function findDueCronMinute(
   job: CronJob,
   at: Date,
-  state: CronStateFile,
-  graceMinutes?: number
+  state: CronStateFile
 ): Date | null {
   if (!cronJobEnabled(job)) return null;
   // catchUp "skip": stale slots are dropped — never look back beyond the
-  // standard tick window even when graceMinutes is large (A3).
-  const jobGrace =
+  // standard tick window even when job.graceMinutes is large (A3).
+  const grace =
     job.catchUp === "skip"
       ? CRON_DUE_GRACE_MINUTES
       : job.graceMinutes ?? CRON_DUE_GRACE_MINUTES;
-  const grace = graceMinutes ?? jobGrace;
   const cron = parseCronExpression(job.cron);
   const tick = new Date(at);
   tick.setSeconds(0, 0);
